@@ -1,0 +1,19 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: payments-route
+  namespace: eks-gateway-demo
+spec:
+  parentRefs:
+  - name: core-apis-service-network
+    sectionName: https
+  hostnames:
+  - payments.api.example.com
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    - name: payments
+      port: 80

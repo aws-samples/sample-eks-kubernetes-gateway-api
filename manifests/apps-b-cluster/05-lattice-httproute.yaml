@@ -1,0 +1,19 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: inventory-route
+  namespace: eks-gateway-demo
+spec:
+  parentRefs:
+  - name: core-apis-service-network
+    sectionName: https
+  hostnames:
+  - inventory.api.example.com
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    - name: inventory
+      port: 80

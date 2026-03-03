@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cart
+  namespace: eks-gateway-demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: cart
+  template:
+    metadata:
+      labels:
+        app: cart
+    spec:
+      containers:
+      - name: cart
+        image: hashicorp/http-echo
+        args:
+          - "-text=Hello from cart.api.example.com - Your cart is updated!"
+        ports:
+        - containerPort: 5678

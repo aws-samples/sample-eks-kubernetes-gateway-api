@@ -1,0 +1,7 @@
+.DS_Store
+*.json.bak
+iam_policy.json
+vpc-lattice-policy.json
+eks-pod-identity-trust-policy.json
+shop-tls.key
+shop-tls.crt
