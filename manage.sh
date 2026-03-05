@@ -3,13 +3,16 @@
 #
 #  manage.sh — Unified deployment & lifecycle management
 #
-#  Single entry-point for the EKS Gateway API demo. Provisions infrastructure,
+#  Single entry-point for the EKS Gateway API sample. Provisions infrastructure,
 #  builds container images, configures three EKS clusters, and deploys all
 #  application workloads including VPC Lattice connectivity.
 #
 #  Usage:
-#    ./manage.sh deploy     # Full deploy (infra → images → clusters → apps)
-#    ./manage.sh teardown   # Full teardown (reverse order)
+#    ./manage.sh deploy            # Full deploy (infra → images → clusters → apps → networking)
+#    ./manage.sh deploy-infra      # Deploy up to infrastructure (steps 1-3)
+#    ./manage.sh deploy-clusters   # Deploy up to cluster config (steps 1-4)
+#    ./manage.sh deploy-apps       # Deploy up to applications (steps 1-5)
+#    ./manage.sh teardown          # Full teardown (reverse order)
 #
 #  Environment variables (all optional — sensible defaults provided):
 #    AWS_REGION       — Target region          (default: read from terraform.tfvars)
@@ -40,7 +43,10 @@ BACKEND_A_CLUSTER="${PROJECT_PREFIX}-backend-a-cluster"
 BACKEND_B_CLUSTER="${PROJECT_PREFIX}-backend-b-cluster"
 
 PRIVATE_ZONE="$(read_tfvar private_hosted_zone_name)"
-CERTIFICATE_ARN="$(read_tfvar certificate_arn)"
+ALB_PROTOCOL="$(read_tfvar alb_protocol)"
+ALB_CERTIFICATE_ARN="$(read_tfvar alb_certificate_arn)"
+VPCLATTICE_PROTOCOL="$(read_tfvar vpclattice_protocol)"
+VPCLATTICE_CERTIFICATE_ARN="$(read_tfvar vpclattice_certificate_arn)"
 FRONTEND_DOMAIN="$(read_tfvar frontend_domain_name)"
 
 ACTION="${1:-}"
@@ -138,8 +144,7 @@ deploy_infra() {
   info "WAF WebACL, Route 53 zones, and Pod Identity associations."
   info "Estimated time: 15-20 minutes."
   echo ""
-  terraform -chdir="${INFRA_DIR}" apply -auto-approve -input=false \
-    | grep -E '(Apply complete|Error)' || true
+  terraform -chdir="${INFRA_DIR}" apply -auto-approve -input=false
   success "Infrastructure deployed"
 
   # Cache Terraform outputs for later steps
@@ -198,8 +203,8 @@ deploy_cluster_config() {
   kubectl apply -f "${K8S_DIR}/cluster-config/gatewayclass-vpc-lattice.yaml"
   success "GatewayClass amazon-vpc-lattice created"
 
-  step "Installing ExternalDNS..."
-  install_external_dns
+  step "Installing ExternalDNS (private zone)..."
+  install_external_dns "${TF_PRIVATE_HZ_ID}" "private"
   success "ExternalDNS running on Backend A"
 
   # ── Backend B ──────────────────────────────────────────────────────────────
@@ -237,8 +242,8 @@ deploy_cluster_config() {
   kubectl apply -f "${K8S_DIR}/cluster-config/gatewayclass-vpc-lattice.yaml"
   success "GatewayClass amazon-vpc-lattice created"
 
-  step "Installing ExternalDNS..."
-  install_external_dns
+  step "Installing ExternalDNS (private zone)..."
+  install_external_dns "${TF_PRIVATE_HZ_ID}" "private"
   success "ExternalDNS running on Backend B"
 
   # ── Frontend ───────────────────────────────────────────────────────────────
@@ -269,7 +274,7 @@ deploy_cluster_config() {
     --set vpcId="${FRONTEND_VPC_ID}" \
     --set serviceAccount.create=false \
     --set serviceAccount.name=aws-load-balancer-controller \
-    --set "controllerConfig.featureGates=ALBGatewayAPI=true" \
+    --set "controllerConfig.featureGates.ALBGatewayAPI=true" \
     --wait --timeout=10m 2>&1 | tail -3
   success "AWS Load Balancer Controller running (Gateway API enabled)"
 
@@ -277,8 +282,8 @@ deploy_cluster_config() {
   kubectl apply -f "${K8S_DIR}/cluster-config/gatewayclass-alb.yaml"
   success "GatewayClass aws-alb created"
 
-  step "Installing ExternalDNS..."
-  install_external_dns
+  step "Installing ExternalDNS (public zone)..."
+  install_external_dns "$(read_tfvar public_hosted_zone_id)" "public"
   success "ExternalDNS running on Frontend"
 }
 
@@ -338,6 +343,7 @@ deploy_apps() {
   kubectl apply -f "${K8S_DIR}/applications/bff/service.yaml"
   sed -e "s|<ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com|${ECR_BASE}|g" \
       -e "s|<PRIVATE_ZONE>|${PRIVATE_ZONE}|g" \
+      -e "s|<VPCLATTICE_PROTOCOL>|${VPCLATTICE_PROTOCOL,,}|g" \
     "${K8S_DIR}/applications/bff/deployment.yaml" | kubectl apply -f -
   success "BFF deployed"
 
@@ -356,11 +362,19 @@ deploy_networking() {
   # ── Frontend: ALB Gateway ──────────────────────────────────────────────────
   use_cluster "${FRONTEND_CLUSTER}"
 
-  step "Deploying ALB Gateway (internet-facing)..."
-  sed -e "s|<CERTIFICATE_ARN>|${CERTIFICATE_ARN}|g" \
-      -e "s|<WAF_ACL_ARN>|${TF_WAF_ACL_ARN}|g" \
-      -e "s|<FRONTEND_DOMAIN_NAME>|${FRONTEND_DOMAIN}|g" \
-    "${K8S_DIR}/applications/frontend/alb-gateway.yaml" | kubectl apply -f -
+  if [ "${ALB_PROTOCOL}" = "HTTPS" ]; then
+    step "Deploying ALB Gateway (internet-facing, HTTPS)..."
+    sed -e "s|<ALB_CERTIFICATE_ARN>|${ALB_CERTIFICATE_ARN}|g" \
+        -e "s|<WAF_ACL_ARN>|${TF_WAF_ACL_ARN}|g" \
+        -e "s|<FRONTEND_DOMAIN_NAME>|${FRONTEND_DOMAIN}|g" \
+      "${K8S_DIR}/applications/frontend/alb-gateway-https.yaml" | kubectl apply -f -
+  else
+    warn "ALB protocol is HTTP. Traffic between client and ALB will be unencrypted."
+    warn "HTTPS is recommended for production environments."
+    step "Deploying ALB Gateway (internet-facing, HTTP)..."
+    sed -e "s|<WAF_ACL_ARN>|${TF_WAF_ACL_ARN}|g" \
+      "${K8S_DIR}/applications/frontend/alb-gateway-http.yaml" | kubectl apply -f -
+  fi
   success "ALB Gateway resources applied"
 
   step "Waiting for ALB to be provisioned (up to 5 min)..."
@@ -371,34 +385,57 @@ deploy_networking() {
   if [ -n "${ALB_HOSTNAME}" ]; then
     success "ALB ready: ${ALB_HOSTNAME}"
   fi
+  if [ "${ALB_PROTOCOL}" = "HTTPS" ]; then
+    info "ExternalDNS will create the public DNS record for ${FRONTEND_DOMAIN}"
+  else
+    info "Access the frontend at: http://${ALB_HOSTNAME}"
+  fi
 
   # ── Backend A: VPC Lattice for Items (cart + inventory) ────────────────────
   use_cluster "${BACKEND_A_CLUSTER}"
 
   step "Deploying VPC Lattice resources for Items service (cart + inventory)..."
-  sed -e "s|<LATTICE_CERTIFICATE_ARN>|${CERTIFICATE_ARN}|g" \
-      -e "s|<ITEMS_HOSTNAME>|items.${PRIVATE_ZONE}|g" \
-      -e "s|<SERVICE_NETWORK_NAME>|${TF_SERVICE_NETWORK_NAME}|g" \
-      -e "s|<ITEMS_LOG_GROUP_ARN>|${TF_ITEMS_LOG_GROUP_ARN}|g" \
-    "${K8S_DIR}/applications/cart-inventory-services/vpc-lattice.yaml" | kubectl apply -f -
+  if [ "${VPCLATTICE_PROTOCOL}" = "HTTPS" ]; then
+    sed -e "s|<VPCLATTICE_CERTIFICATE_ARN>|${VPCLATTICE_CERTIFICATE_ARN}|g" \
+        -e "s|<ITEMS_HOSTNAME>|items.${PRIVATE_ZONE}|g" \
+        -e "s|<SERVICE_NETWORK_NAME>|${TF_SERVICE_NETWORK_NAME}|g" \
+        -e "s|<ITEMS_LOG_GROUP_ARN>|${TF_ITEMS_LOG_GROUP_ARN}|g" \
+      "${K8S_DIR}/applications/cart-inventory-services/vpc-lattice-https.yaml" | kubectl apply -f -
+  else
+    warn "VPC Lattice protocol is HTTP. Traffic between BFF and backend services will be unencrypted."
+    warn "HTTPS is recommended for production environments."
+    sed -e "s|<ITEMS_HOSTNAME>|items.${PRIVATE_ZONE}|g" \
+        -e "s|<SERVICE_NETWORK_NAME>|${TF_SERVICE_NETWORK_NAME}|g" \
+        -e "s|<ITEMS_LOG_GROUP_ARN>|${TF_ITEMS_LOG_GROUP_ARN}|g" \
+      "${K8S_DIR}/applications/cart-inventory-services/vpc-lattice-http.yaml" | kubectl apply -f -
+  fi
   success "Items VPC Lattice resources applied"
 
   step "Waiting for Items VPC Lattice service (up to 5 min)..."
-  wait_for_lattice_service "items-service-route" "items"
+  wait_for_lattice_service "items-service-route"
+  info "ExternalDNS will create the DNS record for items.${PRIVATE_ZONE}"
 
   # ── Backend B: VPC Lattice for Payments ────────────────────────────────────
   use_cluster "${BACKEND_B_CLUSTER}"
 
   step "Deploying VPC Lattice resources for Payments service..."
-  sed -e "s|<LATTICE_CERTIFICATE_ARN>|${CERTIFICATE_ARN}|g" \
-      -e "s|<PAYMENTS_HOSTNAME>|payments.${PRIVATE_ZONE}|g" \
-      -e "s|<SERVICE_NETWORK_NAME>|${TF_SERVICE_NETWORK_NAME}|g" \
-      -e "s|<PAYMENTS_LOG_GROUP_ARN>|${TF_PAYMENTS_LOG_GROUP_ARN}|g" \
-    "${K8S_DIR}/applications/payments-service/vpc-lattice.yaml" | kubectl apply -f -
+  if [ "${VPCLATTICE_PROTOCOL}" = "HTTPS" ]; then
+    sed -e "s|<VPCLATTICE_CERTIFICATE_ARN>|${VPCLATTICE_CERTIFICATE_ARN}|g" \
+        -e "s|<PAYMENTS_HOSTNAME>|payments.${PRIVATE_ZONE}|g" \
+        -e "s|<SERVICE_NETWORK_NAME>|${TF_SERVICE_NETWORK_NAME}|g" \
+        -e "s|<PAYMENTS_LOG_GROUP_ARN>|${TF_PAYMENTS_LOG_GROUP_ARN}|g" \
+      "${K8S_DIR}/applications/payments-service/vpc-lattice-https.yaml" | kubectl apply -f -
+  else
+    sed -e "s|<PAYMENTS_HOSTNAME>|payments.${PRIVATE_ZONE}|g" \
+        -e "s|<SERVICE_NETWORK_NAME>|${TF_SERVICE_NETWORK_NAME}|g" \
+        -e "s|<PAYMENTS_LOG_GROUP_ARN>|${TF_PAYMENTS_LOG_GROUP_ARN}|g" \
+      "${K8S_DIR}/applications/payments-service/vpc-lattice-http.yaml" | kubectl apply -f -
+  fi
   success "Payments VPC Lattice resources applied"
 
   step "Waiting for Payments VPC Lattice service (up to 5 min)..."
-  wait_for_lattice_service "payments-service-route" "payments"
+  wait_for_lattice_service "payments-service-route"
+  info "ExternalDNS will create the DNS record for payments.${PRIVATE_ZONE}"
 
   # ── Restart BFF to pick up DNS ─────────────────────────────────────────────
   use_cluster "${FRONTEND_CLUSTER}"
@@ -424,7 +461,8 @@ teardown_networking() {
   if cluster_exists "${BACKEND_A_CLUSTER}"; then
     step "Removing Items VPC Lattice resources (Backend A)..."
     use_cluster "${BACKEND_A_CLUSTER}"
-    kubectl delete -f "${K8S_DIR}/applications/cart-inventory-services/vpc-lattice.yaml" --ignore-not-found --timeout=120s 2>/dev/null || true
+    kubectl delete -f "${K8S_DIR}/applications/cart-inventory-services/vpc-lattice-https.yaml" --ignore-not-found --timeout=120s 2>/dev/null || true
+    kubectl delete -f "${K8S_DIR}/applications/cart-inventory-services/vpc-lattice-http.yaml" --ignore-not-found --timeout=120s 2>/dev/null || true
     success "Items VPC Lattice resources removed"
     did_something=true
   else
@@ -434,7 +472,8 @@ teardown_networking() {
   if cluster_exists "${BACKEND_B_CLUSTER}"; then
     step "Removing Payments VPC Lattice resources (Backend B)..."
     use_cluster "${BACKEND_B_CLUSTER}"
-    kubectl delete -f "${K8S_DIR}/applications/payments-service/vpc-lattice.yaml" --ignore-not-found --timeout=120s 2>/dev/null || true
+    kubectl delete -f "${K8S_DIR}/applications/payments-service/vpc-lattice-https.yaml" --ignore-not-found --timeout=120s 2>/dev/null || true
+    kubectl delete -f "${K8S_DIR}/applications/payments-service/vpc-lattice-http.yaml" --ignore-not-found --timeout=120s 2>/dev/null || true
     success "Payments VPC Lattice resources removed"
     did_something=true
   else
@@ -445,7 +484,8 @@ teardown_networking() {
   if cluster_exists "${FRONTEND_CLUSTER}"; then
     step "Removing ALB Gateway (Frontend)..."
     use_cluster "${FRONTEND_CLUSTER}"
-    kubectl delete -f "${K8S_DIR}/applications/frontend/alb-gateway.yaml" --ignore-not-found --timeout=120s 2>/dev/null || true
+    kubectl delete -f "${K8S_DIR}/applications/frontend/alb-gateway-https.yaml" --ignore-not-found --timeout=120s 2>/dev/null || true
+    kubectl delete -f "${K8S_DIR}/applications/frontend/alb-gateway-http.yaml" --ignore-not-found --timeout=120s 2>/dev/null || true
     success "ALB Gateway removed"
     did_something=true
   else
@@ -611,10 +651,9 @@ load_tf_outputs_safe() {
   TF_BACKEND_B_VPC_ID="${TF_BACKEND_B_VPC_ID:-$(terraform -chdir="${INFRA_DIR}" output -raw backend_b_vpc_id 2>/dev/null || true)}"
 }
 
-# Wait for a VPC Lattice service to be created and register its DNS
+# Wait for a VPC Lattice service to be created (ARN annotation on the HTTPRoute)
 wait_for_lattice_service() {
   local route_name="$1"
-  local service_name="$2"
   local lattice_arn=""
 
   for i in $(seq 1 30); do
@@ -622,28 +661,13 @@ wait_for_lattice_service() {
       -o jsonpath='{.metadata.annotations.application-networking\.k8s\.aws/lattice-service-arn}' 2>/dev/null || true)
     if [ -n "${lattice_arn}" ]; then
       success "VPC Lattice service created: ${lattice_arn}"
-      break
+      return
     fi
     info "Waiting for VPC Lattice service... (${i}/30)"
     sleep 10
   done
 
-  if [ -z "${lattice_arn}" ]; then
-    warn "VPC Lattice service not ready after 5 min — check: kubectl describe httproute ${route_name}"
-    return
-  fi
-
-  # Create Route 53 CNAME
-  local lattice_service_id lattice_dns
-  lattice_service_id=$(echo "${lattice_arn}" | awk -F'/' '{print $NF}')
-  lattice_dns=$(aws vpc-lattice get-service --service-identifier "${lattice_service_id}" --region "${AWS_REGION}" \
-    --query 'dnsEntry.domainName' --output text)
-
-  step "Creating Route 53 CNAME: ${service_name}.${PRIVATE_ZONE} → VPC Lattice"
-  aws route53 change-resource-record-sets --hosted-zone-id "${TF_PRIVATE_HZ_ID}" --change-batch "{
-    \"Changes\": [{\"Action\": \"UPSERT\", \"ResourceRecordSet\": {\"Name\": \"${service_name}.${PRIVATE_ZONE}\", \"Type\": \"CNAME\", \"TTL\": 5, \"ResourceRecords\": [{\"Value\": \"${lattice_dns}\"}]}}]
-  }"
-  success "DNS: ${service_name}.${PRIVATE_ZONE} → ${lattice_dns}"
+  warn "VPC Lattice service not ready after 5 min — check: kubectl describe httproute ${route_name}"
 }
 
 
@@ -652,21 +676,31 @@ wait_for_lattice_service() {
 #   - Private zone: CNAME records (VPC Lattice) + TXT ownership records
 #   - Public zone:  A/AAAA alias records (ALB) + TXT ownership records
 # After ExternalDNS is uninstalled these become orphans and block zone deletion.
+# Each zone is only cleaned when the corresponding protocol mode was active.
 cleanup_externaldns_records() {
   local owner_id="${PROJECT_PREFIX}"
 
   # ── Private hosted zone (VPC Lattice CNAMEs + TXT) ─────────────────────────
+  # ExternalDNS on the backend clusters only runs when vpclattice_protocol is
+  # set (it always runs, but only creates records when services are deployed).
+  # The private zone always exists, so always attempt cleanup.
   if [ -n "${TF_PRIVATE_HZ_ID:-}" ]; then
     info "Cleaning private hosted zone (${PRIVATE_ZONE})..."
     delete_records_from_zone "${TF_PRIVATE_HZ_ID}" "${owner_id}"
   fi
 
   # ── Public hosted zone (ALB A/AAAA aliases + TXT) ──────────────────────────
-  local public_hz_id
-  public_hz_id="$(read_tfvar public_hosted_zone_id)"
-  if [ -n "${public_hz_id:-}" ]; then
-    info "Cleaning public hosted zone (${public_hz_id})..."
-    delete_records_from_zone "${public_hz_id}" "${owner_id}"
+  # ExternalDNS on the frontend cluster only creates records when
+  # alb_protocol = HTTPS (HTTP mode has no custom domain to register).
+  if [ "${ALB_PROTOCOL}" = "HTTPS" ]; then
+    local public_hz_id
+    public_hz_id="$(read_tfvar public_hosted_zone_id)"
+    if [ -n "${public_hz_id:-}" ]; then
+      info "Cleaning public hosted zone (${public_hz_id})..."
+      delete_records_from_zone "${public_hz_id}" "${owner_id}"
+    fi
+  else
+    info "ALB protocol is HTTP — no public hosted zone records to clean up"
   fi
 }
 
@@ -751,7 +785,12 @@ else:
 }
 
 # Install ExternalDNS via Helm on the current cluster context
+# Usage: install_external_dns <zone_id> <zone_type>
+#   zone_id   — Route 53 hosted zone ID to manage
+#   zone_type — "public" or "private" (maps to --aws-zone-type)
 install_external_dns() {
+  local zone_id="$1"
+  local zone_type="$2"
   kubectl create namespace external-dns --dry-run=client -o yaml | kubectl apply -f -
   kubectl apply -f "${K8S_DIR}/cluster-config/external-dns-sa.yaml"
   helm repo add external-dns https://kubernetes-sigs.github.io/external-dns/ 2>/dev/null || true
@@ -759,12 +798,14 @@ install_external_dns() {
   helm upgrade --install external-dns external-dns/external-dns \
     --namespace external-dns \
     --set provider.name=aws \
-    --set "sources={gateway-httproute,gateway-grpcroute,gateway-tlsroute,gateway-tcproute,gateway-udproute}" \
+    --set "sources={gateway-httproute}" \
     --set serviceAccount.create=false \
     --set serviceAccount.name=external-dns \
     --set policy=upsert-only \
     --set registry=txt \
     --set txtOwnerId="${PROJECT_PREFIX}" \
+    --set "extraArgs.aws-zone-type=${zone_type}" \
+    --set "extraArgs.zone-id-filter=${zone_id}" \
     --wait --timeout=5m 2>&1 | tail -3
 }
 
@@ -778,9 +819,14 @@ print_usage() {
   echo ""
   echo -e "${BOLD}Usage:${RESET}  ./manage.sh <command>"
   echo ""
-  echo -e "${BOLD}Commands:${RESET}"
-  echo "  deploy       Full deployment (ECR → images → infra → clusters → apps → networking)"
-  echo "  teardown     Full teardown   (networking → apps → clusters → infra)"
+  echo -e "${BOLD}Deploy commands:${RESET}"
+  echo "  deploy              Full deployment (ECR → images → infra → clusters → apps → networking)"
+  echo "  deploy-infra        Deploy up to infrastructure (steps 1-3: ECR + images + Terraform)"
+  echo "  deploy-clusters     Deploy up to cluster config  (steps 1-4: + controllers & ExternalDNS)"
+  echo "  deploy-apps         Deploy up to applications    (steps 1-5: + services on each cluster)"
+  echo ""
+  echo -e "${BOLD}Teardown commands:${RESET}"
+  echo "  teardown            Full teardown (networking → apps → clusters → infra)"
   echo ""
   echo -e "${BOLD}Environment:${RESET}"
   echo "  AWS_REGION       Target AWS region       (default: from terraform.tfvars)"
@@ -788,16 +834,20 @@ print_usage() {
   echo ""
 }
 
+# Helper: print deploy summary header
+print_deploy_header() {
+  echo -e "${DIM}  Region:   ${AWS_REGION}${RESET}"
+  echo -e "${DIM}  Prefix:   ${PROJECT_PREFIX}${RESET}"
+  echo -e "${DIM}  Account:  ${ACCOUNT_ID}${RESET}"
+  echo -e "${DIM}  Domain:   ${FRONTEND_DOMAIN}${RESET}"
+  echo ""
+  check_prerequisites
+}
+
 case "${ACTION}" in
   deploy)
     banner "FULL DEPLOYMENT"
-    echo -e "${DIM}  Region:   ${AWS_REGION}${RESET}"
-    echo -e "${DIM}  Prefix:   ${PROJECT_PREFIX}${RESET}"
-    echo -e "${DIM}  Account:  ${ACCOUNT_ID}${RESET}"
-    echo -e "${DIM}  Domain:   ${FRONTEND_DOMAIN}${RESET}"
-    echo ""
-
-    check_prerequisites
+    print_deploy_header
 
     deploy_ecr
     deploy_images
@@ -817,6 +867,59 @@ case "${ACTION}" in
     info ""
     info "All three clusters are deployed and connected via VPC Lattice."
     info "Open the frontend URL to see the architecture in action."
+    echo ""
+    ;;
+
+  deploy-infra)
+    banner "DEPLOY — Infrastructure Only (Steps 1-3)"
+    print_deploy_header
+
+    deploy_ecr
+    deploy_images
+    deploy_infra
+
+    banner "INFRASTRUCTURE DEPLOYED"
+    info "ECR repos, container images, and all Terraform resources are ready."
+    info ""
+    info "Next steps:"
+    info "  ./manage.sh deploy-clusters   # Configure EKS clusters (step 4)"
+    info "  ./manage.sh deploy            # Or deploy everything at once"
+    echo ""
+    ;;
+
+  deploy-clusters)
+    banner "DEPLOY — Up to Cluster Configuration (Steps 1-4)"
+    print_deploy_header
+
+    deploy_ecr
+    deploy_images
+    deploy_infra
+    deploy_cluster_config
+
+    banner "CLUSTERS CONFIGURED"
+    info "All three EKS clusters have controllers and ExternalDNS running."
+    info ""
+    info "Next steps:"
+    info "  ./manage.sh deploy-apps   # Deploy applications (step 5)"
+    info "  ./manage.sh deploy        # Or deploy everything at once"
+    echo ""
+    ;;
+
+  deploy-apps)
+    banner "DEPLOY — Up to Applications (Steps 1-5)"
+    print_deploy_header
+
+    deploy_ecr
+    deploy_images
+    deploy_infra
+    deploy_cluster_config
+    deploy_apps
+
+    banner "APPLICATIONS DEPLOYED"
+    info "All services are running. Networking (ALB + VPC Lattice) is not yet configured."
+    info ""
+    info "Next steps:"
+    info "  ./manage.sh deploy   # Deploy networking (step 6) to complete the setup"
     echo ""
     ;;
 

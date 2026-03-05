@@ -31,9 +31,9 @@ spec:
         - containerPort: 8000
         env:
         - name: ITEMS_SERVICE_URL
-          value: "https://items.<PRIVATE_ZONE>"
+          value: "<VPCLATTICE_PROTOCOL>://items.<PRIVATE_ZONE>"
         - name: PAYMENTS_SERVICE_URL
-          value: "https://payments.<PRIVATE_ZONE>"
+          value: "<VPCLATTICE_PROTOCOL>://payments.<PRIVATE_ZONE>"
         - name: REQUEST_TIMEOUT
           value: "10"
         - name: AWS_REGION

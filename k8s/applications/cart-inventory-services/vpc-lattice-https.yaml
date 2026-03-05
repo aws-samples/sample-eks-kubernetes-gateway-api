@@ -1,0 +1,170 @@
+# VPC Lattice resources for the "items" service (Backend A Cluster) — HTTPS mode
+#
+# Single VPC Lattice service at items.<domain> with one HTTPRoute containing
+# two rules that route by header: x-service: cart → cart-service,
+# x-service: inventory → inventory-service.
+#
+# Placeholders:
+#   <VPCLATTICE_CERTIFICATE_ARN>  — ACM cert ARN in the deployment region
+#   <ITEMS_HOSTNAME>              — e.g. items.blueprints.example.com
+#   <SERVICE_NETWORK_NAME>        — VPC Lattice service network name
+#   <ITEMS_LOG_GROUP_ARN>         — CloudWatch log group ARN for access logs
+#
+# =============================================================================
+# VpcAssociationPolicy — prevent the controller from associating the backend
+# cluster VPC with the service network. These clusters only serve traffic
+# (targets registered by IP), they don't consume services from the network.
+# =============================================================================
+---
+apiVersion: application-networking.k8s.aws/v1alpha1
+kind: VpcAssociationPolicy
+metadata:
+  name: disable-vpc-association
+spec:
+  targetRef:
+    group: "gateway.networking.k8s.io"
+    kind: Gateway
+    name: <SERVICE_NETWORK_NAME>
+  associateWithVpc: false
+# =============================================================================
+# Gateway — single VPC Lattice service for items
+# =============================================================================
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: <SERVICE_NETWORK_NAME>
+spec:
+  gatewayClassName: amazon-vpc-lattice
+  listeners:
+  - name: https
+    protocol: HTTPS
+    port: 443
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - name: unused
+      options:
+        application-networking.k8s.aws/certificate-arn: "<VPCLATTICE_CERTIFICATE_ARN>"
+# =============================================================================
+# HTTPRoute — header-based routing: x-service: cart | inventory
+# =============================================================================
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: items-service-route
+spec:
+  hostnames:
+  - "<ITEMS_HOSTNAME>"
+  parentRefs:
+  - name: <SERVICE_NETWORK_NAME>
+    sectionName: https
+  rules:
+  - matches:
+    - headers:
+      - name: x-service
+        value: cart
+    backendRefs:
+    - name: cart-service
+      kind: Service
+      port: 8000
+  - matches:
+    - headers:
+      - name: x-service
+        value: inventory
+    backendRefs:
+    - name: inventory-service
+      kind: Service
+      port: 8000
+# =============================================================================
+# TargetGroupPolicies — health checks for each backend
+# =============================================================================
+---
+apiVersion: application-networking.k8s.aws/v1alpha1
+kind: TargetGroupPolicy
+metadata:
+  name: cart-service-tgp
+spec:
+  targetRef:
+    group: ""
+    kind: Service
+    name: cart-service
+  protocol: HTTP
+  protocolVersion: HTTP1
+  healthCheck:
+    enabled: true
+    path: "/health"
+    port: 8000
+    protocol: HTTP
+    protocolVersion: HTTP1
+    statusMatch: "200"
+    intervalSeconds: 10
+    timeoutSeconds: 5
+    healthyThresholdCount: 2
+    unhealthyThresholdCount: 3
+---
+apiVersion: application-networking.k8s.aws/v1alpha1
+kind: TargetGroupPolicy
+metadata:
+  name: inventory-service-tgp
+spec:
+  targetRef:
+    group: ""
+    kind: Service
+    name: inventory-service
+  protocol: HTTP
+  protocolVersion: HTTP1
+  healthCheck:
+    enabled: true
+    path: "/health"
+    port: 8000
+    protocol: HTTP
+    protocolVersion: HTTP1
+    statusMatch: "200"
+    intervalSeconds: 10
+    timeoutSeconds: 5
+    healthyThresholdCount: 2
+    unhealthyThresholdCount: 3
+# =============================================================================
+# IAMAuthPolicy — applied to the single HTTPRoute
+# =============================================================================
+---
+apiVersion: application-networking.k8s.aws/v1alpha1
+kind: IAMAuthPolicy
+metadata:
+  name: items-service-auth
+spec:
+  targetRef:
+    group: "gateway.networking.k8s.io"
+    kind: HTTPRoute
+    name: items-service-route
+  policy: |
+    {
+      "Statement": {
+        "Effect": "Allow",
+        "Principal": "*",
+        "Resource": "*",
+        "Condition": {
+            "StringNotEqualsIgnoreCase": {
+                "aws:PrincipalType": "anonymous"
+            }
+        },
+        "Action": "*"
+      }
+    }
+    
+# =============================================================================
+# AccessLogPolicy — single log destination for the items service
+# =============================================================================
+---
+apiVersion: application-networking.k8s.aws/v1alpha1
+kind: AccessLogPolicy
+metadata:
+  name: items-service-access-logs
+spec:
+  destinationArn: "<ITEMS_LOG_GROUP_ARN>"
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: items-service-route

@@ -1,0 +1,109 @@
+# VPC Lattice resources for Payments Service (Backend B Cluster) — HTTP mode
+#
+# WARNING: HTTP mode is intended for test environments only.
+# Traffic between the BFF and the VPC Lattice service is unencrypted.
+# Use vpc-lattice-https.yaml for production deployments.
+#
+# Placeholders: <PAYMENTS_HOSTNAME>, <SERVICE_NETWORK_NAME>, <PAYMENTS_LOG_GROUP_ARN>
+#
+# =============================================================================
+# VpcAssociationPolicy — prevent the controller from associating the backend
+# cluster VPC with the service network. This cluster only serves traffic
+# (targets registered by IP), it doesn't consume services from the network.
+# =============================================================================
+---
+apiVersion: application-networking.k8s.aws/v1alpha1
+kind: VpcAssociationPolicy
+metadata:
+  name: disable-vpc-association
+spec:
+  targetRef:
+    group: "gateway.networking.k8s.io"
+    kind: Gateway
+    name: <SERVICE_NETWORK_NAME>
+  associateWithVpc: false
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: <SERVICE_NETWORK_NAME>
+spec:
+  gatewayClassName: amazon-vpc-lattice
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: payments-service-route
+spec:
+  hostnames:
+  - "<PAYMENTS_HOSTNAME>"
+  parentRefs:
+  - name: <SERVICE_NETWORK_NAME>
+    sectionName: http
+  rules:
+  - backendRefs:
+    - name: payments-service
+      kind: Service
+      port: 8000
+---
+apiVersion: application-networking.k8s.aws/v1alpha1
+kind: TargetGroupPolicy
+metadata:
+  name: payments-service-tgp
+spec:
+  targetRef:
+    group: ""
+    kind: Service
+    name: payments-service
+  protocol: HTTP
+  protocolVersion: HTTP1
+  healthCheck:
+    enabled: true
+    path: "/health"
+    port: 8000
+    protocol: HTTP
+    protocolVersion: HTTP1
+    statusMatch: "200"
+    intervalSeconds: 10
+    timeoutSeconds: 5
+    healthyThresholdCount: 2
+    unhealthyThresholdCount: 3
+---
+apiVersion: application-networking.k8s.aws/v1alpha1
+kind: IAMAuthPolicy
+metadata:
+  name: payments-service-auth
+spec:
+  targetRef:
+    group: "gateway.networking.k8s.io"
+    kind: HTTPRoute
+    name: payments-service-route
+  policy: |
+    {
+      "Statement": {
+        "Effect": "Allow",
+        "Principal": "*",
+        "Resource": "*",
+        "Condition": {
+            "StringNotEqualsIgnoreCase": {
+                "aws:PrincipalType": "anonymous"
+            }
+        },
+        "Action": "*"
+      }
+    }
+---
+apiVersion: application-networking.k8s.aws/v1alpha1
+kind: AccessLogPolicy
+metadata:
+  name: payments-service-access-logs
+spec:
+  destinationArn: "<PAYMENTS_LOG_GROUP_ARN>"
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: payments-service-route

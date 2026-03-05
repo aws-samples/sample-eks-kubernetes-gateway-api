@@ -87,7 +87,7 @@ resource "aws_eks_cluster" "backend_b" {
   vpc_config {
     endpoint_private_access = true
     endpoint_public_access  = true
-    subnet_ids              = [ for k, v in module.backend_b_vpc.private_subnet_attributes_by_az : v.id if startswith(k, "private/") ]
+    subnet_ids              = [for k, v in module.backend_b_vpc.private_subnet_attributes_by_az : v.id if startswith(k, "private/")]
   }
 
   tags = {

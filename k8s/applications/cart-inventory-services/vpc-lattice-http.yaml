@@ -1,14 +1,13 @@
-# VPC Lattice resources for the "items" service (Backend A Cluster)
+# VPC Lattice resources for the "items" service (Backend A Cluster) — HTTP mode
 #
-# Single VPC Lattice service at items.<domain> with one HTTPRoute containing
-# two rules that route by header: x-service: cart → cart-service,
-# x-service: inventory → inventory-service.
+# WARNING: HTTP mode is intended for test environments only.
+# Traffic between the BFF and the VPC Lattice service is unencrypted.
+# Use vpc-lattice-https.yaml for production deployments.
 #
 # Placeholders:
-#   <LATTICE_CERTIFICATE_ARN>  — ACM cert ARN in the deployment region
-#   <ITEMS_HOSTNAME>           — e.g. items.blueprints.example.com
-#   <SERVICE_NETWORK_NAME>     — VPC Lattice service network name
-#   <ITEMS_LOG_GROUP_ARN>      — CloudWatch log group ARN for access logs
+#   <ITEMS_HOSTNAME>        — e.g. items.blueprints.example.com
+#   <SERVICE_NETWORK_NAME>  — VPC Lattice service network name
+#   <ITEMS_LOG_GROUP_ARN>   — CloudWatch log group ARN for access logs
 #
 # =============================================================================
 # VpcAssociationPolicy — prevent the controller from associating the backend
@@ -27,7 +26,7 @@ spec:
     name: <SERVICE_NETWORK_NAME>
   associateWithVpc: false
 # =============================================================================
-# Gateway — single VPC Lattice service for items
+# Gateway — single VPC Lattice service for items (HTTP listener)
 # =============================================================================
 ---
 apiVersion: gateway.networking.k8s.io/v1
@@ -37,15 +36,9 @@ metadata:
 spec:
   gatewayClassName: amazon-vpc-lattice
   listeners:
-  - name: https
-    protocol: HTTPS
-    port: 443
-    tls:
-      mode: Terminate
-      certificateRefs:
-      - name: unused
-      options:
-        application-networking.k8s.aws/certificate-arn: "<LATTICE_CERTIFICATE_ARN>"
+  - name: http
+    protocol: HTTP
+    port: 80
 # =============================================================================
 # HTTPRoute — header-based routing: x-service: cart | inventory
 # =============================================================================
@@ -59,7 +52,7 @@ spec:
   - "<ITEMS_HOSTNAME>"
   parentRefs:
   - name: <SERVICE_NETWORK_NAME>
-    sectionName: https
+    sectionName: http
   rules:
   - matches:
     - headers:
@@ -153,7 +146,7 @@ spec:
         "Action": "*"
       }
     }
-    
+
 # =============================================================================
 # AccessLogPolicy — single log destination for the items service
 # =============================================================================

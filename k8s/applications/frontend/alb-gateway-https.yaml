@@ -1,8 +1,10 @@
-# ALB Gateway API resources for the frontend service
-# Provisions an internet-facing ALB via the standalone AWS Load Balancer Controller
-# (installed with Gateway API feature gates, NOT the EKS Auto Mode built-in LBC).
+# ALB Gateway API resources for the frontend service — HTTPS mode
+# Provisions an internet-facing ALB with HTTPS listener, ACM certificate, and WAF.
 #
-# Placeholders: <CERTIFICATE_ARN>, <WAF_ACL_ARN>, <FRONTEND_DOMAIN_NAME>
+# Placeholders:
+#   <ALB_CERTIFICATE_ARN>   — ACM certificate ARN for the HTTPS listener
+#   <WAF_ACL_ARN>           — WAF WebACL ARN
+#   <FRONTEND_DOMAIN_NAME>  — Custom domain name (e.g. frontend.app.example.com)
 ---
 apiVersion: gateway.k8s.aws/v1beta1
 kind: LoadBalancerConfiguration
@@ -14,7 +16,7 @@ spec:
     webACL: "<WAF_ACL_ARN>"
   listenerConfigurations:
     - protocolPort: HTTPS:443
-      defaultCertificate: "<CERTIFICATE_ARN>"
+      defaultCertificate: "<ALB_CERTIFICATE_ARN>"
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
@@ -28,12 +30,6 @@ spec:
       kind: LoadBalancerConfiguration
       name: frontend-alb-config
   listeners:
-  - name: http
-    protocol: HTTP
-    port: 80
-    allowedRoutes:
-      namespaces:
-        from: Same
   - name: https
     protocol: HTTPS
     port: 443
@@ -49,8 +45,6 @@ spec:
   hostnames:
   - "<FRONTEND_DOMAIN_NAME>"
   parentRefs:
-  - name: frontend-gateway
-    sectionName: http
   - name: frontend-gateway
     sectionName: https
   rules:

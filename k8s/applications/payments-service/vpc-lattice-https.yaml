@@ -1,5 +1,5 @@
-# VPC Lattice resources for Payments Service (Backend B Cluster)
-# Placeholders: <LATTICE_CERTIFICATE_ARN>, <PAYMENTS_HOSTNAME>, <SERVICE_NETWORK_NAME>, <PAYMENTS_LOG_GROUP_ARN>
+# VPC Lattice resources for Payments Service (Backend B Cluster) — HTTPS mode
+# Placeholders: <VPCLATTICE_CERTIFICATE_ARN>, <PAYMENTS_HOSTNAME>, <SERVICE_NETWORK_NAME>, <PAYMENTS_LOG_GROUP_ARN>
 #
 # =============================================================================
 # VpcAssociationPolicy — prevent the controller from associating the backend
@@ -33,7 +33,7 @@ spec:
       certificateRefs:
       - name: unused
       options:
-        application-networking.k8s.aws/certificate-arn: "<LATTICE_CERTIFICATE_ARN>"
+        application-networking.k8s.aws/certificate-arn: "<VPCLATTICE_CERTIFICATE_ARN>"
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
