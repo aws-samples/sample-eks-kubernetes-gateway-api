@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bff
+  labels:
+    app: bff
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: bff
+  template:
+    metadata:
+      labels:
+        app: bff
+    spec:
+      serviceAccountName: bff-service-account
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      dnsConfig:
+        options:
+        - name: ndots
+          value: "1"
+      containers:
+      - name: bff
+        # Replace <ACCOUNT_ID> and <REGION> with your values
+        image: <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/eks-gateway-demo/bff:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+        env:
+        - name: ITEMS_SERVICE_URL
+          value: "https://items.<PRIVATE_ZONE>"
+        - name: PAYMENTS_SERVICE_URL
+          value: "https://payments.<PRIVATE_ZONE>"
+        - name: REQUEST_TIMEOUT
+          value: "10"
+        - name: AWS_REGION
+          value: "eu-west-1"
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 5

@@ -5,3 +5,10 @@ vpc-lattice-policy.json
 eks-pod-identity-trust-policy.json
 shop-tls.key
 shop-tls.crt
+node_modules/
+dist/
+.terraform/
+*.tfstate
+*.tfstate.backup
+terraform.tfvars
+__pycache__/

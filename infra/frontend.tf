@@ -1,0 +1,249 @@
+# =============================================================================
+# Frontend — VPC, EKS Cluster (Auto Mode), ECR Repositories (Frontend + BFF),
+#             BFF Pod Identity for SigV4 signing to VPC Lattice
+# NOTE: CloudFront + WAF + ALB will be added later
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# ECR Repositories
+# -----------------------------------------------------------------------------
+
+resource "aws_ecr_repository" "frontend" {
+  name                 = "${var.project_prefix}/frontend"
+  image_tag_mutability = "MUTABLE"
+  force_delete         = true
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+}
+
+resource "aws_ecr_repository" "bff" {
+  name                 = "${var.project_prefix}/bff"
+  image_tag_mutability = "MUTABLE"
+  force_delete         = true
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+}
+
+# =============================================================================
+# FRONTEND VPC
+# =============================================================================
+
+module "frontend_vpc" {
+  source  = "aws-ia/vpc/aws"
+  version = "= 4.7.3"
+
+  name                                 = "${var.project_prefix}-frontend-vpc"
+  cidr_block                           = "10.0.0.0/16"
+  vpc_assign_generated_ipv6_cidr_block = true
+  az_count                             = 2
+
+  vpc_lattice = {
+    service_network_identifier = module.vpclattice_service_network.service_network.id
+    security_group_ids         = [aws_security_group.vpclattice_association_sg.id]
+  }
+
+  subnets = {
+    public = {
+      netmask                   = 24
+      assign_ipv6_cidr          = true
+      nat_gateway_configuration = "all_azs"
+      tags = {
+        "kubernetes.io/role/elb" = "1"
+      }
+    }
+    private = {
+      netmask                 = 24
+      assign_ipv6_cidr        = true
+      connect_to_public_natgw = true
+      tags = {
+        "kubernetes.io/role/internal-elb" = "1"
+      }
+    }
+  }
+}
+
+# Security group for VPC Lattice service network VPC association
+resource "aws_security_group" "vpclattice_association_sg" {
+  description = "Security group for VPC Lattice service network association"
+  vpc_id      = module.frontend_vpc.vpc_attributes.id
+
+  tags = {
+    Name = "${var.project_prefix}-lattice-association-sg"
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_vpc_security_group_ingress_rule" "lattice_association_ingress_eks" {
+  security_group_id            = aws_security_group.vpclattice_association_sg.id
+  description                  = "Allow HTTPS from EKS cluster"
+  ip_protocol                  = "tcp"
+  from_port                    = 443
+  to_port                      = 443
+  referenced_security_group_id = aws_eks_cluster.frontend.vpc_config[0].cluster_security_group_id
+}
+
+# =============================================================================
+# EKS Frontend Cluster (Auto Mode)
+# =============================================================================
+resource "aws_eks_cluster" "frontend" {
+  name     = "${var.project_prefix}-frontend-cluster"
+  role_arn = aws_iam_role.eks_cluster.arn
+  version  = "1.35"
+
+  access_config {
+    authentication_mode = "API"
+  }
+
+  bootstrap_self_managed_addons = false
+
+  compute_config {
+    enabled       = true
+    node_pools    = ["general-purpose"]
+    node_role_arn = aws_iam_role.eks_node_group.arn
+  }
+
+  kubernetes_network_config {
+    elastic_load_balancing {
+      enabled = true
+    }
+  }
+
+  storage_config {
+    block_storage {
+      enabled = true
+    }
+  }
+
+  vpc_config {
+    endpoint_private_access = true
+    endpoint_public_access  = true
+    subnet_ids              = [for k, v in module.frontend_vpc.private_subnet_attributes_by_az : v.id if startswith(k, "private/")]
+  }
+
+  tags = {
+    Name = "${var.project_prefix}-frontend-cluster"
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.eks_cluster_policy,
+    aws_iam_role_policy_attachment.eks_compute_policy,
+    aws_iam_role_policy_attachment.eks_block_storage_policy,
+    aws_iam_role_policy_attachment.eks_load_balancing_policy,
+    aws_iam_role_policy_attachment.eks_networking_policy,
+  ]
+}
+
+resource "aws_eks_access_entry" "frontend_admin" {
+  cluster_name  = aws_eks_cluster.frontend.name
+  principal_arn = data.aws_iam_session_context.current.issuer_arn
+  type          = "STANDARD"
+}
+
+resource "aws_eks_access_policy_association" "frontend_admin" {
+  cluster_name  = aws_eks_cluster.frontend.name
+  principal_arn = aws_eks_access_entry.frontend_admin.principal_arn
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+
+  access_scope {
+    type = "cluster"
+  }
+}
+
+# =============================================================================
+# WAF WebACL — standard protections for the internet-facing ALB
+# =============================================================================
+
+resource "aws_wafv2_web_acl" "frontend" {
+  name  = "${var.project_prefix}-frontend-waf"
+  scope = "REGIONAL"
+
+  default_action {
+    allow {}
+  }
+
+  # AWS Managed Rules — Core Rule Set (XSS, SQLi, etc.)
+  rule {
+    name     = "aws-managed-crs"
+    priority = 1
+
+    override_action {
+      none {}
+    }
+
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesCommonRuleSet"
+        vendor_name = "AWS"
+      }
+    }
+
+    visibility_config {
+      sampled_requests_enabled   = true
+      cloudwatch_metrics_enabled = true
+      metric_name                = "${var.project_prefix}-crs"
+    }
+  }
+
+  # AWS Managed Rules — Known Bad Inputs (Log4j, request smuggling, etc.)
+  rule {
+    name     = "aws-managed-bad-inputs"
+    priority = 2
+
+    override_action {
+      none {}
+    }
+
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesKnownBadInputsRuleSet"
+        vendor_name = "AWS"
+      }
+    }
+
+    visibility_config {
+      sampled_requests_enabled   = true
+      cloudwatch_metrics_enabled = true
+      metric_name                = "${var.project_prefix}-bad-inputs"
+    }
+  }
+
+  # Rate limiting (per IP)
+  rule {
+    name     = "rate-limit"
+    priority = 3
+
+    action {
+      block {}
+    }
+
+    statement {
+      rate_based_statement {
+        limit              = 10000
+        aggregate_key_type = "IP"
+      }
+    }
+
+    visibility_config {
+      sampled_requests_enabled   = true
+      cloudwatch_metrics_enabled = true
+      metric_name                = "${var.project_prefix}-rate-limit"
+    }
+  }
+
+  visibility_config {
+    sampled_requests_enabled   = true
+    cloudwatch_metrics_enabled = true
+    metric_name                = "${var.project_prefix}-waf"
+  }
+
+  tags = {
+    Name = "${var.project_prefix}-frontend-waf"
+  }
+}
