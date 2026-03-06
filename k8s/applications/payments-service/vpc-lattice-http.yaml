@@ -84,7 +84,8 @@ spec:
     name: payments-service-route
   policy: |
     {
-      "Statement": {
+      "Version": "2012-10-17",
+      "Statement": [{
         "Effect": "Allow",
         "Principal": "*",
         "Resource": "*",
@@ -94,7 +95,7 @@ spec:
             }
         },
         "Action": "*"
-      }
+      }]
     }
 ---
 apiVersion: application-networking.k8s.aws/v1alpha1

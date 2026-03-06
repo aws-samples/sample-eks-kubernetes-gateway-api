@@ -45,7 +45,7 @@ BACKEND_B_CLUSTER="${PROJECT_PREFIX}-backend-b-cluster"
 PRIVATE_ZONE="$(read_tfvar private_hosted_zone_name)"
 ALB_PROTOCOL="$(read_tfvar alb_protocol)"
 ALB_CERTIFICATE_ARN="$(read_tfvar alb_certificate_arn)"
-VPCLATTICE_PROTOCOL="$(read_tfvar vpclattice_protocol)"
+VPCLATTICE_PROTOCOL="$(read_tfvar vpclattice_protocol | tr '[:upper:]' '[:lower:]')"
 VPCLATTICE_CERTIFICATE_ARN="$(read_tfvar vpclattice_certificate_arn)"
 FRONTEND_DOMAIN="$(read_tfvar frontend_domain_name)"
 
@@ -343,7 +343,8 @@ deploy_apps() {
   kubectl apply -f "${K8S_DIR}/applications/bff/service.yaml"
   sed -e "s|<ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com|${ECR_BASE}|g" \
       -e "s|<PRIVATE_ZONE>|${PRIVATE_ZONE}|g" \
-      -e "s|<VPCLATTICE_PROTOCOL>|${VPCLATTICE_PROTOCOL,,}|g" \
+      -e "s|<VPCLATTICE_PROTOCOL>|${VPCLATTICE_PROTOCOL}|g" \
+      -e "s|<AWS_REGION>|${AWS_REGION}|g" \
     "${K8S_DIR}/applications/bff/deployment.yaml" | kubectl apply -f -
   success "BFF deployed"
 

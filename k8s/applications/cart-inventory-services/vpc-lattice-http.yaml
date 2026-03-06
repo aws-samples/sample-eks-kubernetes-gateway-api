@@ -134,7 +134,8 @@ spec:
     name: items-service-route
   policy: |
     {
-      "Statement": {
+      "Version": "2012-10-17",
+      "Statement": [{
         "Effect": "Allow",
         "Principal": "*",
         "Resource": "*",
@@ -144,9 +145,9 @@ spec:
             }
         },
         "Action": "*"
-      }
+      }]
     }
-
+    
 # =============================================================================
 # AccessLogPolicy — single log destination for the items service
 # =============================================================================

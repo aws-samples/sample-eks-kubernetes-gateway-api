@@ -17,36 +17,7 @@ The application is a three-EKS cluster e-commerce platform: a React frontend and
 
 ## Architecture
 
-```
-                        Internet
-                           │
-                     ┌─────┴─────┐
-                     │  AWS WAF  │
-                     └─────┬─────┘
-                           │
-                     ┌─────┴─────┐
-                     │    ALB    │  ← Gateway API (AWS LBC)
-                     └─────┬─────┘
-                           │
-              ┌────────────┴────────────┐
-              │   Frontend EKS Cluster   │
-              │  ┌──────────┬─────────┐ │
-              │  │ Frontend │   BFF   │ │
-              │  └──────────┴────┬────┘ │
-              └──────────────────┼──────┘
-                                 │ SigV4-signed requests
-                    ┌────────────┴────────────┐
-                    │  VPC Lattice Service     │  ← Gateway API (VPC Lattice Controller)
-                    │       Network            │
-                    └──┬─────────────────┬─────┘
-                       │                 │
-          ┌────────────┴──────┐  ┌───────┴────────────┐
-          │ Backend-A Cluster │  │ Backend-B Cluster   │
-          │ ┌──────┬────────┐│  │ ┌────────────────┐  │
-          │ │ Cart │Inventory││  │ │    Payments    │  │
-          │ └──────┴────────┘│  │ └────────────────┘  │
-          └───────────────────┘  └─────────────────────┘
-```
+![Architecture Diagram](docs/architecture.png)
 
 ## Prerequisites
 
@@ -55,7 +26,7 @@ The application is a three-EKS cluster e-commerce platform: a React frontend and
 | Tool | Min. version | Download |
 |------|-------------|---------|
 | [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) | v2.x | [Install guide](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) |
-| [Terraform](https://developer.hashicorp.com/terraform/install) | v1.5.0 | [Install guide](https://developer.hashicorp.com/terraform/install) |
+| [Terraform](https://developer.hashicorp.com/terraform/install) | v1.9 | [Install guide](https://developer.hashicorp.com/terraform/install) |
 | [kubectl](https://kubernetes.io/docs/tasks/tools/) | v1.28 | [Install guide](https://kubernetes.io/docs/tasks/tools/) |
 | [Helm](https://helm.sh/docs/intro/install/) | v3.x | [Install guide](https://helm.sh/docs/intro/install/) |
 | [Docker](https://docs.docker.com/get-started/get-docker/) | v24.x | [Install guide](https://docs.docker.com/get-started/get-docker/) |
@@ -78,18 +49,37 @@ The following AWS resources are created by this sample. Ensure your account has 
 
 ### Required Configuration
 
-Before deploying, you need two AWS resources that must exist in your account:
+Before deploying, copy `infra/terraform.tfvars.example` to `infra/terraform.tfvars` and fill in your values.
 
-| Variable | Description | Why it's needed |
-|----------|-------------|-----------------|
-| `alb_protocol` | `HTTP` or `HTTPS` (default: `HTTPS`) | Controls whether the ALB listener uses HTTP or HTTPS. |
-| `alb_certificate_arn` | ARN of an ACM certificate covering your domain. Required when `alb_protocol = HTTPS`. | The ALB HTTPS listener uses this certificate for TLS termination. Must be in the same region as the deployment and cover the frontend domain (e.g. `*.app.example.com` or `frontend.app.example.com`). |
-| `vpclattice_protocol` | `HTTP` or `HTTPS` (default: `HTTPS`) | Controls whether the VPC Lattice service listeners use HTTP or HTTPS. The custom domain name is always used regardless of protocol. |
-| `vpclattice_certificate_arn` | ARN of an ACM certificate for VPC Lattice service listeners. Required when `vpclattice_protocol = HTTPS`. | Used for TLS termination on the VPC Lattice backend listeners. Can be the same certificate as `alb_certificate_arn` if it covers both domains. |
-| `public_hosted_zone_id` | Route 53 public hosted zone ID for your domain. Required when `alb_protocol = HTTPS`. | ExternalDNS writes the ALB's A/AAAA records here so the frontend domain resolves publicly. The zone must already exist; this sample does not create it. Not needed for HTTP mode since the user accesses the app via the raw ALB DNS name. |
-| `frontend_domain_name` | Custom domain name for the frontend (e.g. `frontend.app.example.com`). Required when `alb_protocol = HTTPS`. | Used in the HTTPRoute hostname and by ExternalDNS to create the DNS record. Not needed for HTTP mode. |
+**Always required:**
 
-> **HTTPS is recommended for production environments.** Both `alb_protocol` and `vpclattice_protocol` can be set independently. Setting either to `HTTP` means traffic on that path is unencrypted: `alb_protocol = HTTP` exposes the frontend over plain HTTP (no custom domain needed, user accesses via the raw ALB DNS name); `vpclattice_protocol = HTTP` means traffic between the BFF and the backend services is unencrypted. For a fully certificate-free test environment, set both to `HTTP` — no ACM certificates or custom domain are required, only `private_hosted_zone_name` for VPC Lattice service discovery.
+| Variable | Description |
+|----------|-------------|
+| `aws_region` | AWS region for deployment |
+| `private_hosted_zone_name` | Domain name for the Route 53 private hosted zone used for VPC Lattice service discovery. Always required because VPC Lattice services use custom domain names regardless of protocol. |
+
+**Protocol selection (both default to `HTTPS`):**
+
+| Variable | Values | Description |
+|----------|--------|-------------|
+| `alb_protocol` | `HTTP` or `HTTPS` | Protocol for the frontend ALB listener |
+| `vpclattice_protocol` | `HTTP` or `HTTPS` | Protocol for the VPC Lattice service listeners |
+
+**Required when `alb_protocol = HTTPS`:**
+
+| Variable | Description |
+|----------|-------------|
+| `alb_certificate_arn` | ACM certificate ARN for the ALB HTTPS listener. Must be in the same region and cover the frontend domain (e.g. `*.app.example.com`). |
+| `public_hosted_zone_id` | Route 53 public hosted zone ID. ExternalDNS writes the ALB's A/AAAA records here. The zone must already exist. |
+| `frontend_domain_name` | Custom domain name for the frontend (e.g. `frontend.app.example.com`). |
+
+**Required when `vpclattice_protocol = HTTPS`:**
+
+| Variable | Description |
+|----------|-------------|
+| `vpclattice_certificate_arn` | ACM certificate ARN for VPC Lattice HTTPS listeners. Can be the same certificate as `alb_certificate_arn` if it covers both domains. |
+
+> **HTTPS is recommended for production environments.** Both protocols can be set independently. For a fully certificate-free test environment, set both to `HTTP`; only `aws_region` and `private_hosted_zone_name` are required.
 
 ## Quick deploy
 
@@ -97,7 +87,7 @@ If you want everything running with a single command:
 
 ### 1. Configure
 
-Edit `infra/terraform.tfvars` with your values:
+Edit `infra/terraform.tfvars` with your values (copy from `infra/terraform.tfvars.example`):
 
 ```hcl
 aws_region                 = "eu-west-1"
@@ -280,11 +270,15 @@ See [Gateway API Controllers](docs/gateway-api.md#backend-clusters-vpc-lattice-g
 ## Related Resources
 
 - [Kubernetes Gateway API Specification](https://gateway-api.sigs.k8s.io/)
-- [AWS Load Balancer Controller](https://kubernetes-sigs.github.io/aws-load-balancer-controller/)
+- [AWS Load Balancer Gateway API Controller](https://kubernetes-sigs.github.io/aws-load-balancer-controller/latest/guide/gateway/gateway/)
 - [Amazon VPC Lattice Gateway API Controller](https://www.gateway-api-controller.eks.aws.dev/)
 - [EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html)
 - [EKS Pod Identity](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html)
 
+## Security
+
+See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
+
 ## License
 
-This sample code is made available under the MIT-0 license. See the LICENSE file.
+This library is licensed under the MIT-0 License. See the LICENSE file.

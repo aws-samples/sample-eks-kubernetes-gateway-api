@@ -28,8 +28,17 @@ spec:
             cpu: 50m
             memory: 64Mi
           limits:
-            cpu: 200m
-            memory: 256Mi
+            memory: 256Mi   # no CPU limit — fractional limits cause throttling; requests handle scheduling
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
         livenessProbe:
           httpGet:
             path: /health
@@ -42,3 +51,7 @@ spec:
             port: 8000
           initialDelaySeconds: 5
           periodSeconds: 5
+      volumes:
+      - name: tmp
+        emptyDir:
+          medium: Memory

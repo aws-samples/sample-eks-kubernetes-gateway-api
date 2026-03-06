@@ -8,6 +8,8 @@
 # # =============================================================================
 
 resource "aws_ecr_repository" "cart_service" {
+  #checkov:skip=CKV_AWS_136:KMS encryption adds cost and complexity not relevant to this Gateway API sample
+  #checkov:skip=CKV_AWS_51:Mutable tags accepted for this sample — see security/report.html
   name                 = "${var.project_prefix}/cart-service"
   image_tag_mutability = "MUTABLE"
   force_delete         = true
@@ -18,6 +20,8 @@ resource "aws_ecr_repository" "cart_service" {
 }
 
 resource "aws_ecr_repository" "inventory_service" {
+  #checkov:skip=CKV_AWS_136:KMS encryption adds cost and complexity not relevant to this Gateway API sample
+  #checkov:skip=CKV_AWS_51:Mutable tags accepted for this sample — see security/report.html
   name                 = "${var.project_prefix}/inventory-service"
   image_tag_mutability = "MUTABLE"
   force_delete         = true
@@ -28,6 +32,7 @@ resource "aws_ecr_repository" "inventory_service" {
 }
 
 module "backend_a_vpc" {
+  #checkov:skip=CKV_TF_1:Version pinning is sufficient for a sample; commit hash pinning is a production concern
   source  = "aws-ia/vpc/aws"
   version = "= 4.7.3"
 
@@ -57,6 +62,8 @@ module "backend_a_vpc" {
 # =============================================================================
 
 resource "aws_cloudwatch_log_group" "items_service_loggroup" {
+  #checkov:skip=CKV_AWS_158:KMS encryption adds cost and complexity not relevant to this Gateway API sample
+  #checkov:skip=CKV_AWS_338:7-day retention is sufficient for a sample; increase for production
   name              = "/aws/vpc-lattice/${var.project_prefix}-items-service"
   retention_in_days = 7
 }
@@ -68,7 +75,14 @@ resource "aws_cloudwatch_log_group" "items_service_loggroup" {
 resource "aws_eks_cluster" "backend_a" {
   name     = "${var.project_prefix}-backend-a-cluster"
   role_arn = aws_iam_role.eks_cluster.arn
-  version  = "1.35"
+  version  = var.kubernetes_version
+
+  #checkov:skip=CKV_AWS_38:Public endpoint intentionally open — deploy script runs from developer's local machine
+  #checkov:skip=CKV_AWS_39:Public endpoint intentionally open — deploy script runs from developer's local machine
+  #checkov:skip=CKV_AWS_58:Secrets encryption requires KMS key — adds complexity not relevant to this sample
+  #checkov:skip=CKV_AWS_339:EKS 1.35 is supported; scanner may not recognise the latest versions
+
+  enabled_cluster_log_types = ["api", "audit", "authenticator", "controllerManager", "scheduler"]
 
   access_config {
     authentication_mode = "API"

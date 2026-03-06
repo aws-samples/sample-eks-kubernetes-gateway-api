@@ -73,7 +73,7 @@ The frontend cluster gets two controllers:
 - Installed in `kube-system` with `serviceAccount.create=false` (the SA is pre-created for Pod Identity)
 - Feature gate `ALBGatewayAPI=true` enables Gateway API support
 - `vpcId` and `region` are set explicitly (required for EKS Auto Mode where IMDS may not be reachable)
-- This is a self-managed install — the EKS Auto Mode built-in LBC does not support Gateway API at the time of writing
+- This is a self-managed install (the EKS Auto Mode built-in LBC does not support Gateway API at the time of writing)
 
 ```bash
 helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
@@ -141,3 +141,34 @@ To reduce IAM complexity, some roles are shared across clusters:
 - **ExternalDNS role**: One role with permissions on both hosted zones, used by all three clusters
 
 Per-cluster roles exist only where the permissions differ: the AWS LBC role (frontend only) and the BFF pod role (frontend only, for `vpc-lattice-svcs:Invoke`).
+
+## EKS Control Plane Logging
+
+All three clusters have `enabled_cluster_log_types` configured to send the following log streams to CloudWatch:
+
+```hcl
+enabled_cluster_log_types = ["api", "audit", "authenticator", "controllerManager", "scheduler"]
+```
+
+This enables full visibility into API server activity, authentication events, and control plane component behaviour, which is essential for security incident investigation. Logs are sent to the `/aws/eks/<cluster-name>/cluster` log group in CloudWatch.
+
+## Container Security Hardening
+
+All application containers are configured with a hardened `securityContext` at the container level:
+
+```yaml
+securityContext:
+  allowPrivilegeEscalation: false   # prevents setuid/setgid escalation
+  readOnlyRootFilesystem: true      # prevents writing to container filesystem
+  capabilities:
+    drop: ["ALL"]                   # drops all Linux capabilities
+  seccompProfile:
+    type: RuntimeDefault            # applies the container runtime's default seccomp filter
+```
+
+Since `readOnlyRootFilesystem: true` prevents writes to the container filesystem, services that need temporary write access use in-memory `emptyDir` volumes:
+
+- **Python services** (bff, cart, inventory, payments): `/tmp` mounted as tmpfs for uvicorn and Python runtime temp files
+- **Frontend** (nginx): `/tmp`, `/var/cache/nginx`, and `/var/run` mounted as tmpfs
+
+CPU limits are intentionally not set on any container. Fractional CPU limits (e.g. `250m`) cause kernel throttling even when the node has spare capacity, introducing latency spikes. CPU requests are set for scheduling purposes; Karpenter uses them to bin-pack pods onto nodes. Memory limits are retained to prevent OOM conditions.

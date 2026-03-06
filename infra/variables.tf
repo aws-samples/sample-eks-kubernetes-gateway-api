@@ -3,7 +3,7 @@
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# Required Variables
+# Always required
 # -----------------------------------------------------------------------------
 
 variable "aws_region" {
@@ -11,14 +11,8 @@ variable "aws_region" {
   type        = string
 }
 
-variable "vpclattice_certificate_arn" {
-  description = "ACM certificate ARN for VPC Lattice service HTTPS listeners. Required when vpclattice_protocol = HTTPS. Must be in the deployment region."
-  type        = string
-  default     = null
-}
-
 variable "private_hosted_zone_name" {
-  description = "Domain name for the Route 53 private hosted zone. Used for internal service discovery via VPC Lattice."
+  description = "Domain name for the Route 53 private hosted zone. Used for internal service discovery via VPC Lattice regardless of protocol."
   type        = string
 }
 
@@ -75,13 +69,29 @@ variable "frontend_domain_name" {
 }
 
 # -----------------------------------------------------------------------------
-# Optional Variables
+# Required when vpclattice_protocol = "HTTPS"
+# -----------------------------------------------------------------------------
+
+variable "vpclattice_certificate_arn" {
+  description = "ACM certificate ARN for VPC Lattice service HTTPS listeners. Required when vpclattice_protocol = HTTPS. Must be in the deployment region."
+  type        = string
+  default     = null
+}
+
+# -----------------------------------------------------------------------------
+# Optional
 # -----------------------------------------------------------------------------
 
 variable "project_prefix" {
   description = "Project name prefix for all resource names."
   type        = string
   default     = "eks-gateway-demo"
+}
+
+variable "kubernetes_version" {
+  description = "Kubernetes version for all EKS clusters. Must support EKS Auto Mode and Pod Identity."
+  type        = string
+  default     = "1.35"
 }
 
 # -----------------------------------------------------------------------------

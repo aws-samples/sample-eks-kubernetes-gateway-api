@@ -1,0 +1,30 @@
+# =============================================================================
+# terraform.tfvars.example
+#
+# Copy this file to terraform.tfvars and fill in your values.
+# terraform.tfvars is in .gitignore — never commit it.
+# =============================================================================
+
+aws_region = "eu-west-1"
+
+# ALB protocol: HTTPS (recommended) or HTTP (test environments only)
+alb_protocol = "HTTPS"
+
+# Required when alb_protocol = HTTPS
+alb_certificate_arn = "arn:aws:acm:<region>:<account-id>:certificate/<certificate-id>"
+public_hosted_zone_id = "<route53-public-hosted-zone-id>"
+frontend_domain_name = "frontend.<your-domain>"
+
+# VPC Lattice protocol: HTTPS (recommended) or HTTP (test environments only)
+vpclattice_protocol = "HTTPS"
+
+# Required when vpclattice_protocol = HTTPS
+# Can be the same certificate as alb_certificate_arn if it covers both domains
+vpclattice_certificate_arn = "arn:aws:acm:<region>:<account-id>:certificate/<certificate-id>"
+
+# Domain name for the Route 53 private hosted zone (internal service discovery)
+private_hosted_zone_name = "<your-domain>"
+
+# Optional — defaults shown
+# project_prefix     = "eks-gateway-demo"
+# kubernetes_version = "1.35"

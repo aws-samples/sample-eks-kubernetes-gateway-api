@@ -1,16 +1,28 @@
 """Cart Service — in-memory shopping cart.
 
 Runs in EKS, accessed via VPC Lattice.
-Simple demo cart — single global cart (no sessions).
+
+IMPORTANT — Sample simplification:
+  The cart is stored as a module-level Python list. This means:
+  - All users share the same cart (no session isolation)
+  - State is lost on pod restart
+  - Concurrent requests can cause race conditions
+  In production, replace with a per-session store (e.g. Redis, DynamoDB).
 """
 
+import logging
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request
 from pydantic import BaseModel
 
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+
 app = FastAPI(title="Cart Service")
 
+# Single shared cart — intentionally simple for this sample.
+# See module docstring for production considerations.
 cart_items: list[dict] = []
 
 

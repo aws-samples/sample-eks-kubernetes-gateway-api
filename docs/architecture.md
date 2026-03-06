@@ -32,7 +32,7 @@ The backend VPCs are intentionally not associated with the service network. They
 
 Two Route 53 hosted zones handle DNS:
 
-- **Public hosted zone**: Managed by ExternalDNS on the frontend cluster. Contains A/AAAA alias records pointing `frontend.<domain>` to the ALB. Only created when `alb_protocol = HTTPS` — in HTTP mode there is no custom domain and ExternalDNS has nothing to register.
+- **Public hosted zone**: Managed by ExternalDNS on the frontend cluster. Contains A/AAAA alias records pointing `frontend.<domain>` to the ALB. Only created when `alb_protocol = HTTPS`; in HTTP mode there is no custom domain and ExternalDNS has nothing to register.
 - **Private hosted zone**: Associated with the frontend VPC. Managed by ExternalDNS on the backend clusters. Contains CNAME records pointing `items.<domain>` and `payments.<domain>` to their VPC Lattice service DNS names.
 
 If you configure the private zone with the same domain name as the public zone, ExternalDNS instances must be scoped using `--aws-zone-type` (public vs private) and `--zone-id-filter` to ensure each instance only writes to its intended zone. If you use different domain names for each zone, this scoping is still recommended as a best practice to avoid unintended record creation.
@@ -59,15 +59,18 @@ Each VPC Lattice HTTPRoute has an [`IAMAuthPolicy`](https://www.gateway-api-cont
 
 ```json
 {
-  "Effect": "Allow",
-  "Principal": "*",
-  "Action": "*",
-  "Resource": "*",
-  "Condition": {
-    "StringNotEqualsIgnoreCase": {
-      "aws:PrincipalType": "anonymous"
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": "*",
+    "Action": "*",
+    "Resource": "*",
+    "Condition": {
+      "StringNotEqualsIgnoreCase": {
+        "aws:PrincipalType": "anonymous"
+      }
     }
-  }
+  }]
 }
 ```
 

@@ -3,7 +3,7 @@
 # =============================================================================
 
 terraform {
-  required_version = ">= 1.5.0"
+  required_version = "~> 1.9"
 
   required_providers {
     aws = {
@@ -11,6 +11,13 @@ terraform {
       version = ">= 6.0.0"
     }
   }
+
+  # Uncomment and configure for team use — local state is fine for individual evaluation.
+  # backend "s3" {
+  #   bucket         = "<your-state-bucket>"
+  #   key            = "eks-gateway-demo/terraform.tfstate"
+  #   region         = "<your-region>"
+  # }
 }
 
 # Default AWS provider

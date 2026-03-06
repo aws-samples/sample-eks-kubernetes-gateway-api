@@ -6,7 +6,7 @@ This document describes the five application services, the BFF pattern, SigV4 re
 
 | Service | Cluster | Framework | Port | Code | Purpose |
 |---------|---------|-----------|------|------|---------|
-| Frontend | Frontend | [React](https://react.dev) + [Vite](https://vitejs.dev) + [Tailwind](https://tailwindcss.com) | 80 (nginx) | `app/frontend/` | Product catalog UI, cart, architecture diagram |
+| Frontend | Frontend | [React](https://react.dev) + [Vite](https://vitejs.dev) + [Tailwind](https://tailwindcss.com) | 8080 (nginx, internal) / 80 (Service) | `app/frontend/` | Product catalog UI, cart, architecture diagram |
 | BFF | Frontend | [FastAPI](https://fastapi.tiangolo.com) (Python) | 8000 | `app/bff/` | Orchestrates backend calls with SigV4 signing |
 | Cart | Backend-A | [FastAPI](https://fastapi.tiangolo.com) (Python) | 8000 | `app/cart-service/` | In-memory shopping cart |
 | Inventory | Backend-A | [FastAPI](https://fastapi.tiangolo.com) (Python) | 8000 | `app/inventory-service/` | Static product catalog (10 unicorn products) |
@@ -53,6 +53,46 @@ SigV4Auth(credentials, "vpc-lattice-svcs", region).add_auth(request)
 ```
 
 The BFF pod gets credentials automatically via [EKS Pod Identity](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html). The `bff-service-account` is associated with an IAM role that has `vpc-lattice-svcs:Invoke` permission.
+
+### HTTP Client Lifecycle
+
+The BFF uses a single shared [httpx.AsyncClient](https://www.python-httpx.org/async/) for all outbound requests, created at application startup via FastAPI's [lifespan](https://fastapi.tiangolo.com/advanced/events/) context manager:
+
+```python
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _http_client, _health_client
+    _http_client = httpx.AsyncClient(timeout=REQUEST_TIMEOUT)
+    _health_client = httpx.AsyncClient(timeout=HEALTH_TIMEOUT)
+    yield
+    await _http_client.aclose()
+    await _health_client.aclose()
+```
+
+Creating the client once at startup allows httpx to maintain a connection pool. Subsequent requests to the same VPC Lattice host reuse existing TCP connections (HTTP keep-alive), eliminating the overhead of a new TCP handshake (and TLS handshake in HTTPS mode) on every API call. A separate `_health_client` is used for health checks since it has a shorter timeout (`HEALTH_TIMEOUT=3s`) than regular requests (`REQUEST_TIMEOUT=10s`).
+
+### Request Validation
+
+The BFF validates incoming request bodies before signing and forwarding them to backend services. `AddToCartRequest` and `PaymentRequest` Pydantic models are defined in `app/bff/models.py` and mirror the backend service models:
+
+```python
+class AddToCartRequest(BaseModel):
+    sku: str
+    name: str
+    price: float
+
+    @field_validator("price")
+    def price_must_be_positive(cls, v): ...
+
+class PaymentRequest(BaseModel):
+    items: list[dict]
+    total: float
+
+    @field_validator("total")
+    def total_must_be_positive(cls, v): ...
+```
+
+This means malformed or invalid payloads are rejected at the BFF boundary with a 422 response before any SigV4 signing or network call occurs.
 
 ### Routing to Backend Services
 

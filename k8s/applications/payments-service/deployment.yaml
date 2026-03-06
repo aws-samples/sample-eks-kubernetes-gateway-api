@@ -14,11 +14,18 @@ spec:
       labels:
         app: payments-service
     spec:
+      terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: payments-service
       containers:
-      - name: payments-service
         image: <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/eks-gateway-demo/payments-service:latest
         imagePullPolicy: Always
         ports:
@@ -28,8 +35,17 @@ spec:
             cpu: 50m
             memory: 64Mi
           limits:
-            cpu: 200m
-            memory: 256Mi
+            memory: 256Mi   # no CPU limit — fractional limits cause throttling; requests handle scheduling
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
         livenessProbe:
           httpGet:
             path: /health
@@ -42,3 +58,17 @@ spec:
             port: 8000
           initialDelaySeconds: 5
           periodSeconds: 5
+      volumes:
+      - name: tmp
+        emptyDir:
+          medium: Memory
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: payments-service-pdb
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: payments-service

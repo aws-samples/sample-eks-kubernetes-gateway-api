@@ -180,6 +180,9 @@ data "aws_iam_policy_document" "gateway_api_controller" {
 }
 
 resource "aws_iam_role_policy" "gateway_api_controller" {
+  #checkov:skip=CKV_AWS_109:VPC Lattice controller requires broad permissions; resource ARNs are dynamic
+  #checkov:skip=CKV_AWS_111:VPC Lattice controller requires broad permissions; resource ARNs are dynamic
+  #checkov:skip=CKV_AWS_356:VPC Lattice controller requires broad permissions; resource ARNs are dynamic
   name   = "${var.project_prefix}-gateway-api-controller-policy"
   role   = aws_iam_role.gateway_api_controller.id
   policy = data.aws_iam_policy_document.gateway_api_controller.json
@@ -442,6 +445,9 @@ data "aws_iam_policy_document" "aws_lbc" {
 }
 
 resource "aws_iam_role_policy" "aws_lbc" {
+  #checkov:skip=CKV_AWS_109:AWS LBC requires broad permissions; load balancer ARNs are dynamic
+  #checkov:skip=CKV_AWS_111:AWS LBC requires broad permissions; load balancer ARNs are dynamic
+  #checkov:skip=CKV_AWS_356:AWS LBC requires broad permissions; load balancer ARNs are dynamic
   name   = "${var.project_prefix}-aws-lbc-policy"
   role   = aws_iam_role.aws_lbc.id
   policy = data.aws_iam_policy_document.aws_lbc.json

@@ -6,6 +6,7 @@
 # VPC Lattice Service Network
 # -----------------------------------------------------------------------------
 module "vpclattice_service_network" {
+  #checkov:skip=CKV_TF_1:Version pinning is sufficient for a sample; commit hash pinning is a production concern
   source  = "aws-ia/amazon-vpc-lattice-module/aws"
   version = "1.1.0"
 
@@ -32,6 +33,8 @@ module "vpclattice_service_network" {
 }
 
 resource "aws_cloudwatch_log_group" "service_network_loggroup" {
+  #checkov:skip=CKV_AWS_158:KMS encryption adds cost and complexity not relevant to this Gateway API sample
+  #checkov:skip=CKV_AWS_338:7-day retention is sufficient for a sample; increase for production
   name              = "/aws/vpc-lattice/${var.project_prefix}-service-network"
   retention_in_days = 7
 }

@@ -1,7 +1,6 @@
 # =============================================================================
 # Frontend — VPC, EKS Cluster (Auto Mode), ECR Repositories (Frontend + BFF),
-#             BFF Pod Identity for SigV4 signing to VPC Lattice
-# NOTE: CloudFront + WAF + ALB will be added later
+#             WAF WebACL, ALB via Gateway API, BFF Pod Identity for SigV4 signing
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -9,6 +8,8 @@
 # -----------------------------------------------------------------------------
 
 resource "aws_ecr_repository" "frontend" {
+  #checkov:skip=CKV_AWS_136:KMS encryption adds cost and complexity not relevant to this Gateway API sample
+  #checkov:skip=CKV_AWS_51:Mutable tags accepted for this sample — see security/report.html
   name                 = "${var.project_prefix}/frontend"
   image_tag_mutability = "MUTABLE"
   force_delete         = true
@@ -19,6 +20,8 @@ resource "aws_ecr_repository" "frontend" {
 }
 
 resource "aws_ecr_repository" "bff" {
+  #checkov:skip=CKV_AWS_136:KMS encryption adds cost and complexity not relevant to this Gateway API sample
+  #checkov:skip=CKV_AWS_51:Mutable tags accepted for this sample — see security/report.html
   name                 = "${var.project_prefix}/bff"
   image_tag_mutability = "MUTABLE"
   force_delete         = true
@@ -33,6 +36,7 @@ resource "aws_ecr_repository" "bff" {
 # =============================================================================
 
 module "frontend_vpc" {
+  #checkov:skip=CKV_TF_1:Version pinning is sufficient for a sample; commit hash pinning is a production concern
   source  = "aws-ia/vpc/aws"
   version = "= 4.7.3"
 
@@ -82,10 +86,10 @@ resource "aws_security_group" "vpclattice_association_sg" {
 
 resource "aws_vpc_security_group_ingress_rule" "lattice_association_ingress_eks" {
   security_group_id            = aws_security_group.vpclattice_association_sg.id
-  description                  = "Allow HTTPS from EKS cluster"
+  description                  = "Allow access from EKS cluster"
   ip_protocol                  = "tcp"
-  from_port                    = 443
-  to_port                      = 443
+  from_port                    = var.vpclattice_protocol == "HTTPS" ? 443 : 80
+  to_port                      = var.vpclattice_protocol == "HTTPS" ? 443 : 80
   referenced_security_group_id = aws_eks_cluster.frontend.vpc_config[0].cluster_security_group_id
 }
 
@@ -95,7 +99,14 @@ resource "aws_vpc_security_group_ingress_rule" "lattice_association_ingress_eks"
 resource "aws_eks_cluster" "frontend" {
   name     = "${var.project_prefix}-frontend-cluster"
   role_arn = aws_iam_role.eks_cluster.arn
-  version  = "1.35"
+  version  = var.kubernetes_version
+
+  #checkov:skip=CKV_AWS_38:Public endpoint intentionally open — deploy script runs from developer's local machine
+  #checkov:skip=CKV_AWS_39:Public endpoint intentionally open — deploy script runs from developer's local machine
+  #checkov:skip=CKV_AWS_58:Secrets encryption requires KMS key — adds complexity not relevant to this sample
+  #checkov:skip=CKV_AWS_339:EKS 1.35 is supported; scanner may not recognise the latest versions
+
+  enabled_cluster_log_types = ["api", "audit", "authenticator", "controllerManager", "scheduler"]
 
   access_config {
     authentication_mode = "API"

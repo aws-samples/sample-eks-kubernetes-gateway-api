@@ -6,9 +6,9 @@ This document explains how the two [Gateway API](https://gateway-api.sigs.k8s.io
 
 [Gateway API](https://gateway-api.sigs.k8s.io/) is a Kubernetes-native networking API designed to replace Ingress. It uses a layered resource model where each layer has a clear owner and responsibility:
 
-- **[GatewayClass](https://gateway-api.sigs.k8s.io/api-types/gatewayclass/)**: A cluster-scoped resource that names a controller implementation. Think of it like a StorageClass — it declares "this controller handles Gateways of this type." Typically created once by a cluster operator.
+- **[GatewayClass](https://gateway-api.sigs.k8s.io/api-types/gatewayclass/)**: A cluster-scoped resource that names a controller implementation. Think of it like a StorageClass; it declares "this controller handles Gateways of this type." Typically created once by a cluster operator.
 - **[Gateway](https://gateway-api.sigs.k8s.io/api-types/gateway/)**: Declares a piece of network infrastructure and its listeners. The controller watching the GatewayClass provisions the actual AWS resource (an ALB, a VPC Lattice service) when a Gateway is created.
-- **[HTTPRoute](https://gateway-api.sigs.k8s.io/api-types/httproute/)**: Defines routing rules and attaches to a Gateway via `parentRefs`. Application teams own this resource — they describe how traffic should be routed to their services without knowing anything about the underlying infrastructure.
+- **[HTTPRoute](https://gateway-api.sigs.k8s.io/api-types/httproute/)**: Defines routing rules and attaches to a Gateway via `parentRefs`. Application teams own this resource; they describe how traffic should be routed to their services without knowing anything about the underlying infrastructure.
 
 The separation is intentional: infrastructure teams manage GatewayClass and Gateway, application teams manage HTTPRoute. The same HTTPRoute spec works regardless of whether the Gateway is backed by an ALB or a VPC Lattice service.
 
@@ -47,9 +47,9 @@ The `controllerName` field is how Kubernetes knows which controller to notify. T
 
 > **HTTPS is recommended for production environments.** HTTP mode is provided for convenience when evaluating the sample without a custom domain or certificate. In HTTP mode, traffic between the client and the ALB is unencrypted and the frontend is accessed via the raw ALB DNS name.
 
-The `alb_protocol` variable in `infra/terraform.tfvars` controls which manifest the deployment script applies. Both variants always include WAF — the only differences are the listener configuration and the HTTPRoute hostname.
+The `alb_protocol` variable in `infra/terraform.tfvars` controls which manifest the deployment script applies. Both variants always include WAF; the only differences are the listener configuration and the HTTPRoute hostname.
 
-**HTTPS mode** (`alb-gateway-https.yaml`): the `LoadBalancerConfiguration` includes the ACM certificate on the HTTPS listener, the `Gateway` declares both HTTP (80) and HTTPS (443) listeners, and the `HTTPRoute` matches the custom domain name:
+**HTTPS mode** (`alb-gateway-https.yaml`): the `LoadBalancerConfiguration` includes the ACM certificate on the HTTPS listener, the `Gateway` declares only the HTTPS (443) listener, and the `HTTPRoute` matches the custom domain name:
 
 When the LBC sees a `Gateway`, it calls the [Elastic Load Balancing API](https://docs.aws.amazon.com/elasticloadbalancing/latest/APIReference/Welcome.html) to create an ALB. The `Gateway` spec declares the listeners:
 
@@ -98,7 +98,7 @@ What the LBC creates in AWS when this is applied:
 - The [AWS WAF WebACL](https://docs.aws.amazon.com/waf/latest/developerguide/web-acl.html) associated with the ALB
 - A DNS address populated in `gateway.status.addresses`, which ExternalDNS uses to create the Route 53 A/AAAA records
 
-**HTTP mode** (`alb-gateway-http.yaml`): the `LoadBalancerConfiguration` includes only the WAF association (no `listenerConfigurations`), the `Gateway` declares only the HTTP (80) listener, and the `HTTPRoute` has no `hostnames` field so it matches all traffic. ExternalDNS has nothing to register since there is no custom domain — the user accesses the frontend via the raw ALB DNS name printed by the deployment script.
+HTTP mode (`alb-gateway-http.yaml`): the `LoadBalancerConfiguration` includes only the WAF association (no `listenerConfigurations`), the `Gateway` declares only the HTTP (80) listener, and the `HTTPRoute` has no `hostnames` field so it matches all traffic. ExternalDNS has nothing to register since there is no custom domain; the user accesses the frontend via the raw ALB DNS name printed by the deployment script.
 
 ### HTTPRoute and TargetGroupConfiguration
 
@@ -161,9 +161,9 @@ spec:
 
 `k8s/applications/cart-inventory-services/vpc-lattice-https.yaml` (HTTPS mode) or `k8s/applications/cart-inventory-services/vpc-lattice-http.yaml` (HTTP mode), and the equivalent files under `k8s/applications/payments-service/`
 
-> **HTTPS is recommended for production environments.** HTTP mode is provided for convenience when evaluating the sample without certificates. The custom domain name is always used regardless of protocol — it is what enables the BFF to resolve the service via the private hosted zone.
+> **HTTPS is recommended for production environments.** HTTP mode is provided for convenience when evaluating the sample without certificates. The custom domain name is always used regardless of protocol; it is what enables the BFF to resolve the service via the private hosted zone.
 
-The `vpclattice_protocol` variable in `infra/terraform.tfvars` controls which manifest the deployment script applies. Both variants include the `VpcAssociationPolicy`, `IAMAuthPolicy`, `TargetGroupPolicy`, and `AccessLogPolicy` — the only differences are the Gateway listener and the HTTPRoute `sectionName`.
+The `vpclattice_protocol` variable in `infra/terraform.tfvars` controls which manifest the deployment script applies. Both variants include the `VpcAssociationPolicy`, `IAMAuthPolicy`, `TargetGroupPolicy`, and `AccessLogPolicy`; the only differences are the Gateway listener and the HTTPRoute `sectionName`.
 
 **HTTPS mode** (`vpc-lattice-https.yaml`): the Gateway declares an HTTPS:443 listener with TLS termination using the ACM certificate passed via the `application-networking.k8s.aws/certificate-arn` listener option, and the HTTPRoute references `sectionName: https`.
 
@@ -270,7 +270,8 @@ spec:
     name: items-service-route
   policy: |
     {
-      "Statement": {
+      "Version": "2012-10-17",
+      "Statement": [{
         "Effect": "Allow",
         "Principal": "*",
         "Resource": "*",
@@ -280,7 +281,7 @@ spec:
           }
         },
         "Action": "*"
-      }
+      }]
     }
 ```
 

@@ -15,9 +15,17 @@ spec:
         app: bff
     spec:
       serviceAccountName: bff-service-account
+      terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: bff
       dnsConfig:
         options:
         - name: ndots
@@ -37,23 +45,50 @@ spec:
         - name: REQUEST_TIMEOUT
           value: "10"
         - name: AWS_REGION
-          value: "eu-west-1"
+          value: "<AWS_REGION>"
         resources:
           requests:
             cpu: 100m
             memory: 128Mi
           limits:
-            cpu: 500m
-            memory: 512Mi
+            memory: 512Mi   # no CPU limit — fractional limits cause throttling; requests handle scheduling
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
         livenessProbe:
           httpGet:
             path: /api/health
             port: 8000
-          initialDelaySeconds: 10
-          periodSeconds: 15
+          initialDelaySeconds: 15
+          periodSeconds: 20
+          timeoutSeconds: 10   # must exceed HEALTH_TIMEOUT (3s) — backend calls can be slow on first attempt
+          failureThreshold: 3
         readinessProbe:
           httpGet:
             path: /api/health
             port: 8000
-          initialDelaySeconds: 5
-          periodSeconds: 5
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 10
+          failureThreshold: 6  # allow more failures — backends may not be up yet when BFF starts
+      volumes:
+      - name: tmp
+        emptyDir:
+          medium: Memory
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: bff-pdb
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: bff

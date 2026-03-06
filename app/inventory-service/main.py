@@ -1,11 +1,16 @@
 """Inventory Service — serves a catalog of unicorn products.
 
-Runs in EKS, accessed via VPC Lattice.
+Runs in EKS, accessed via VPC Lattice via the shared "items" service.
+The BFF routes requests here using the x-service: inventory header.
 """
 
+import logging
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
 app = FastAPI(title="Inventory Service")
 
