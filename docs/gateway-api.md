@@ -228,8 +228,8 @@ spec:
 In this sample, the VpcAssociationPolicy is applied differently per cluster:
 
 - **Backend A** (`k8s/applications/items/`): Has `VpcAssociationPolicy` with `associateWithVpc: false`. Backend A only serves traffic (catalog and pricing); it does not call other Lattice services, so its VPC does not need to be associated with the service network.
-- **Backend B** (`k8s/applications/cart/`): Does **not** have a VpcAssociationPolicy. The Backend B VPC must be associated with the service network because the Cart service consumes the Payments service via VPC Lattice during checkout. The controller's default behavior (creating the VPC association) is the correct behavior here.
-- **Edge** (`k8s/applications/payments/`): Does **not** have a VpcAssociationPolicy. The edge VPC is already associated with the service network via Terraform (for the BFF to consume services), so the controller's default association is harmless and idempotent.
+- **Backend B** (`k8s/applications/cart/`): Does **not** have a VpcAssociationPolicy. The Backend B VPC is associated with the service network via Terraform (as part of the infrastructure deployment) because the Cart service consumes the Payments service via VPC Lattice during checkout.
+- **Edge** (`k8s/applications/payments/`): Does **not** have a VpcAssociationPolicy. The edge VPC is also associated with the service network via Terraform (for the BFF to consume services), so no additional association is needed.
 
 ### HTTPRoute and header based routing
 
