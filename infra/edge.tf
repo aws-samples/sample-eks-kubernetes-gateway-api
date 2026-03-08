@@ -71,7 +71,7 @@ module "edge_vpc" {
 
   vpc_lattice = {
     service_network_identifier = module.vpclattice_service_network.service_network.id
-    security_group_ids         = [aws_security_group.vpclattice_association_sg.id]
+    security_group_ids         = [aws_security_group.vpclattice_association_edge_sg.id]
   }
 
   subnets = {
@@ -95,12 +95,12 @@ module "edge_vpc" {
 }
 
 # Security group for VPC Lattice service network VPC association
-resource "aws_security_group" "vpclattice_association_sg" {
+resource "aws_security_group" "vpclattice_association_edge_sg" {
   description = "Security group for VPC Lattice service network association"
   vpc_id      = module.edge_vpc.vpc_attributes.id
 
   tags = {
-    Name = "${var.project_prefix}-lattice-association-sg"
+    Name = "${var.project_prefix}-lattice-edge-association-sg"
   }
 
   lifecycle {
@@ -108,8 +108,8 @@ resource "aws_security_group" "vpclattice_association_sg" {
   }
 }
 
-resource "aws_vpc_security_group_ingress_rule" "lattice_association_ingress_eks" {
-  security_group_id            = aws_security_group.vpclattice_association_sg.id
+resource "aws_vpc_security_group_ingress_rule" "lattice_association_edge_ingress_eks" {
+  security_group_id            = aws_security_group.vpclattice_association_edge_sg.id
   description                  = "Allow access from EKS cluster"
   ip_protocol                  = "tcp"
   from_port                    = var.vpclattice_protocol == "HTTPS" ? 443 : 80

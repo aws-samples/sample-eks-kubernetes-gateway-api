@@ -32,6 +32,7 @@ module "backend_b_vpc" {
 
   vpc_lattice = {
     service_network_identifier = module.vpclattice_service_network.service_network.id
+    security_group_ids         = [aws_security_group.vpclattice_association_backend_sg.id]
   }
 
   subnets = {
@@ -47,6 +48,29 @@ module "backend_b_vpc" {
       connect_to_eigw         = true
     }
   }
+}
+
+# Security group for VPC Lattice service network VPC association
+resource "aws_security_group" "vpclattice_association_backend_sg" {
+  description = "Security group for VPC Lattice service network association"
+  vpc_id      = module.backend_b_vpc.vpc_attributes.id
+
+  tags = {
+    Name = "${var.project_prefix}-lattice-backend-association-sg"
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_vpc_security_group_ingress_rule" "lattice_association_backend_ingress_eks" {
+  security_group_id            = aws_security_group.vpclattice_association_backend_sg.id
+  description                  = "Allow access from EKS cluster"
+  ip_protocol                  = "tcp"
+  from_port                    = var.vpclattice_protocol == "HTTPS" ? 443 : 80
+  to_port                      = var.vpclattice_protocol == "HTTPS" ? 443 : 80
+  referenced_security_group_id = aws_eks_cluster.backend_b.vpc_config[0].cluster_security_group_id
 }
 
 # =============================================================================

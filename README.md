@@ -248,7 +248,7 @@ See [Gateway API Controllers](docs/gateway-api.md#backend-clusters-vpc-lattice-g
 | Topic | What you'll learn |
 |-------|-------------------|
 | [Architecture Overview](docs/architecture.md) | The full infrastructure layout: VPCs, clusters, VPC Lattice service network, WAF, Route 53, and the design decisions behind each component |
-| [Gateway API Controllers](docs/gateway-api.md) | How the two controllers work, the Kubernetes resources they manage (GatewayClass, Gateway, HTTPRoute), VpcAssociationPolicy, IAMAuthPolicy, and header-based routing |
+| [Gateway API Controllers](docs/gateway-api.md) | How both controllers coexist on the edge cluster (ALB + VPC Lattice from the same API), the Kubernetes resources they manage, VpcAssociationPolicy, IAMAuthPolicy, and header based routing |
 | [Cluster Configuration](docs/cluster-configuration.md) | EKS Auto Mode, Graviton NodePools, Pod Identity, Helm chart installs (AWS LBC, VPC Lattice controller, ExternalDNS), and zone-scoped DNS management |
 | [Application Services](docs/application-services.md) | The frontend + BFF pattern, SigV4 request signing, the shared items service with header routing, and end-to-end data flow |
 

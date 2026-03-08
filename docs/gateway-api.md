@@ -351,4 +351,19 @@ On the edge cluster, the ALB HTTPRoute is annotated with `external-dns/zone: pub
 
 ## Same API, different infrastructure
 
-The edge cluster's ALB `HTTPRoute` and the VPC Lattice `HTTPRoute` resources look nearly identical. The difference is the `GatewayClass`: one triggers the LBC to create an ALB with listener rules and target groups, the other triggers the VPC Lattice controller to create a Lattice service with listener rules and target groups. Application teams write the same routing rules regardless of the underlying infrastructure.
+The edge cluster is the clearest demonstration of the Gateway API's power: it runs both the AWS Load Balancer Controller and the VPC Lattice Gateway API Controller simultaneously, each watching for its own GatewayClass. On the same cluster, you can inspect two Gateway resources side by side:
+
+- `frontend-gateway` (GatewayClass `aws-lb-controller`): provisions an internet facing ALB with WAF, HTTPS listeners, and target groups pointing to the frontend pods.
+- The VPC Lattice Gateway (GatewayClass `amazon-vpclattice-controller`): creates a VPC Lattice service for Payments, associates it with the service network, and registers the payments pod IPs as targets.
+
+Both Gateways use the same upstream `gateway.networking.k8s.io/v1` API. Both have HTTPRoutes that define routing rules in the same format. The only difference is the `gatewayClassName` field, which determines whether the route creates an ALB listener rule or a VPC Lattice listener rule. Application teams write identical routing specs; the infrastructure outcome is determined entirely by which controller handles the GatewayClass.
+
+You can verify this on the edge cluster by running:
+
+```bash
+kubectl get gateways
+kubectl get httproutes
+kubectl get gatewayclasses
+```
+
+This will show both Gateways, both HTTPRoutes, and both GatewayClasses coexisting on the same cluster, each managed by a different controller, each producing completely different AWS infrastructure from the same Kubernetes API.
