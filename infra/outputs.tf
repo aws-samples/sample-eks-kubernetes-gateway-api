@@ -17,6 +17,11 @@ output "private_hosted_zone_id" {
   value       = aws_route53_zone.private_hz.zone_id
 }
 
+output "edge_vpc_id" {
+  description = "Edge VPC ID"
+  value       = module.edge_vpc.vpc_attributes.id
+}
+
 output "backend_a_vpc_id" {
   description = "Backend A VPC ID"
   value       = module.backend_a_vpc.vpc_attributes.id
@@ -28,7 +33,7 @@ output "backend_b_vpc_id" {
 }
 
 output "items_service_log_group_arn" {
-  description = "CloudWatch log group ARN for Items (cart+inventory) VPC Lattice access logs"
+  description = "CloudWatch log group ARN for Items (catalog+pricing) VPC Lattice access logs"
   value       = aws_cloudwatch_log_group.items_service_loggroup.arn
 }
 
@@ -37,9 +42,14 @@ output "payments_service_log_group_arn" {
   value       = aws_cloudwatch_log_group.payments_service_loggroup.arn
 }
 
-output "frontend_cluster_name" {
-  description = "Frontend EKS cluster name"
-  value       = aws_eks_cluster.frontend.name
+output "cart_service_log_group_arn" {
+  description = "CloudWatch log group ARN for Cart Service VPC Lattice access logs"
+  value       = aws_cloudwatch_log_group.cart_service_loggroup.arn
+}
+
+output "edge_cluster_name" {
+  description = "Edge EKS cluster name"
+  value       = aws_eks_cluster.edge.name
 }
 
 output "backend_a_cluster_name" {

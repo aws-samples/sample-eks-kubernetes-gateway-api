@@ -1,16 +1,16 @@
 # # =============================================================================
 # # Backend B — VPC, EKS Cluster (Auto Mode), Gateway API Controller
-# # Hosts: payments service
+# # Hosts: cart service (also consumes Payments via VPC Lattice)
 # # =============================================================================
 
 # # =============================================================================
 # # Backend B VPC
 # # =============================================================================
 
-resource "aws_ecr_repository" "payments_service" {
+resource "aws_ecr_repository" "cart" {
   #checkov:skip=CKV_AWS_136:KMS encryption adds cost and complexity not relevant to this Gateway API sample
   #checkov:skip=CKV_AWS_51:Mutable tags accepted for this sample — see security/report.html
-  name                 = "${var.project_prefix}/payments-service"
+  name                 = "${var.project_prefix}/cart"
   image_tag_mutability = "MUTABLE"
   force_delete         = true
 
@@ -29,6 +29,10 @@ module "backend_b_vpc" {
   vpc_assign_generated_ipv6_cidr_block = true
   vpc_egress_only_internet_gateway     = true
   az_count                             = 2
+
+  vpc_lattice = {
+    service_network_identifier = module.vpclattice_service_network.service_network.id
+  }
 
   subnets = {
     public = {
@@ -49,10 +53,10 @@ module "backend_b_vpc" {
 # CloudWatch log group (for VPC Lattice service logs)
 # =============================================================================
 
-resource "aws_cloudwatch_log_group" "payments_service_loggroup" {
+resource "aws_cloudwatch_log_group" "cart_service_loggroup" {
   #checkov:skip=CKV_AWS_158:KMS encryption adds cost and complexity not relevant to this Gateway API sample
   #checkov:skip=CKV_AWS_338:7-day retention is sufficient for a sample; increase for production
-  name              = "/aws/vpc-lattice/${var.project_prefix}-payments-service"
+  name              = "/aws/vpc-lattice/${var.project_prefix}-cart-service"
   retention_in_days = 7
 }
 
@@ -149,4 +153,15 @@ resource "aws_eks_pod_identity_association" "backend_b_gateway_api_controller" {
   namespace       = "aws-application-networking-system"
   service_account = "gateway-api-controller"
   role_arn        = aws_iam_role.gateway_api_controller.arn
+}
+
+# =============================================================================
+# Cart Pod Identity — allows cart service to call Payments via VPC Lattice
+# =============================================================================
+
+resource "aws_eks_pod_identity_association" "cart_pod" {
+  cluster_name    = aws_eks_cluster.backend_b.name
+  namespace       = "default"
+  service_account = "cart-service-account"
+  role_arn        = aws_iam_role.cart_pod.arn
 }

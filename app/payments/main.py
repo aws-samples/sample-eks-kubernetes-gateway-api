@@ -1,7 +1,7 @@
 """Payments Service — processes payment for cart items.
 
-Runs in EKS, accessed via VPC Lattice as a dedicated service (separate from items).
-All requests are SigV4-signed by the BFF before reaching this service.
+Runs in EKS on the Edge cluster, published as a VPC Lattice service.
+Called by the Cart service (Backend-B) during checkout via VPC Lattice with SigV4.
 
 IMPORTANT — Sample simplification:
   Payment processing is simulated — no real payment gateway is called.

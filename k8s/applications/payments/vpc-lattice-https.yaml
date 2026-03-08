@@ -1,49 +1,35 @@
-# VPC Lattice resources for Payments Service (Backend B Cluster) — HTTP mode
-#
-# WARNING: HTTP mode is intended for test environments only.
-# Traffic between the BFF and the VPC Lattice service is unencrypted.
-# Use vpc-lattice-https.yaml for production deployments.
-#
-# Placeholders: <PAYMENTS_HOSTNAME>, <SERVICE_NETWORK_NAME>, <PAYMENTS_LOG_GROUP_ARN>
-#
-# =============================================================================
-# VpcAssociationPolicy — prevent the controller from associating the backend
-# cluster VPC with the service network. This cluster only serves traffic
-# (targets registered by IP), it doesn't consume services from the network.
-# =============================================================================
----
-apiVersion: application-networking.k8s.aws/v1alpha1
-kind: VpcAssociationPolicy
-metadata:
-  name: disable-vpc-association
-spec:
-  targetRef:
-    group: "gateway.networking.k8s.io"
-    kind: Gateway
-    name: <SERVICE_NETWORK_NAME>
-  associateWithVpc: false
+# VPC Lattice resources for Payments Service (Edge Cluster) — HTTPS mode
+# Placeholders: <VPCLATTICE_CERTIFICATE_ARN>, <PAYMENTS_HOSTNAME>, <SERVICE_NETWORK_NAME>, <PAYMENTS_LOG_GROUP_ARN>
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
   name: <SERVICE_NETWORK_NAME>
 spec:
-  gatewayClassName: amazon-vpc-lattice
+  gatewayClassName: amazon-vpclattice-controller
   listeners:
-  - name: http
-    protocol: HTTP
-    port: 80
+  - name: https
+    protocol: HTTPS
+    port: 443
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - name: unused
+      options:
+        application-networking.k8s.aws/certificate-arn: "<VPCLATTICE_CERTIFICATE_ARN>"
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: payments-service-route
+  name: payments-route
+  annotations:
+    external-dns/zone: private
 spec:
   hostnames:
   - "<PAYMENTS_HOSTNAME>"
   parentRefs:
   - name: <SERVICE_NETWORK_NAME>
-    sectionName: http
+    sectionName: https
   rules:
   - backendRefs:
     - name: payments-service
@@ -81,7 +67,7 @@ spec:
   targetRef:
     group: "gateway.networking.k8s.io"
     kind: HTTPRoute
-    name: payments-service-route
+    name: payments-route
   policy: |
     {
       "Version": "2012-10-17",
@@ -89,11 +75,7 @@ spec:
         "Effect": "Allow",
         "Principal": "*",
         "Resource": "*",
-        "Condition": {
-            "StringNotEqualsIgnoreCase": {
-                "aws:PrincipalType": "anonymous"
-            }
-        },
+        "Condition": { "StringNotEqualsIgnoreCase": { "aws:PrincipalType": "anonymous" } },
         "Action": "*"
       }]
     }
@@ -107,4 +89,4 @@ spec:
   targetRef:
     group: gateway.networking.k8s.io
     kind: HTTPRoute
-    name: payments-service-route
+    name: payments-route

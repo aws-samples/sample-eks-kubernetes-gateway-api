@@ -40,6 +40,8 @@ spec:
         env:
         - name: ITEMS_SERVICE_URL
           value: "<VPCLATTICE_PROTOCOL>://items.<PRIVATE_ZONE>"
+        - name: CART_SERVICE_URL
+          value: "<VPCLATTICE_PROTOCOL>://cart.<PRIVATE_ZONE>"
         - name: PAYMENTS_SERVICE_URL
           value: "<VPCLATTICE_PROTOCOL>://payments.<PRIVATE_ZONE>"
         - name: REQUEST_TIMEOUT

@@ -5,64 +5,70 @@ import CartView from "./components/CartView";
 import PaymentConfirmationView from "./components/PaymentConfirmation";
 import NoConnectivityMessage from "./components/NoConnectivityMessage";
 import ArchitectureDiagram from "./components/ArchitectureDiagram";
-import { fetchHealth, fetchInventory, fetchCart, processPayment, addToCart, clearCart, ApiError } from "./api";
-import type { Product, CartItem, LatticeHeaders, PaymentConfirmation } from "./types";
+import { fetchHealth, fetchCatalog, fetchPricing, fetchCart, addToCart, clearCart, checkout, ApiError } from "./api";
+import type { Product, CartItem, LatticeHeaders, CheckoutResponse } from "./types";
 
 const HEALTH_POLL_INTERVAL = 5_000;
 type View = "shop" | "cart" | "confirmation";
 
 function App() {
+  const [catalogReachable, setCatalogReachable] = useState(false);
+  const [pricingReachable, setPricingReachable] = useState(false);
   const [cartReachable, setCartReachable] = useState(false);
   const [paymentsReachable, setPaymentsReachable] = useState(false);
-  const [inventoryReachable, setInventoryReachable] = useState(false);
 
   const [products, setProducts] = useState<Product[]>([]);
-  const [inventoryHeaders, setInventoryHeaders] = useState<LatticeHeaders | null>(null);
+  const [catalogHeaders, setCatalogHeaders] = useState<LatticeHeaders | null>(null);
+  const [pricingHeaders, setPricingHeaders] = useState<LatticeHeaders | null>(null);
   const [cartItems, setCartItems] = useState<CartItem[]>([]);
   const [cartTotal, setCartTotal] = useState(0);
   const [cartHeaders, setCartHeaders] = useState<LatticeHeaders | null>(null);
   const [cartCount, setCartCount] = useState(0);
-  const [paymentResult, setPaymentResult] = useState<PaymentConfirmation | null>(null);
+  const [checkoutResult, setCheckoutResult] = useState<CheckoutResponse | null>(null);
 
   const [view, setView] = useState<View>("shop");
   const [adding, setAdding] = useState<string | null>(null);
   const [paying, setPaying] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
-  const [activeService, setActiveService] = useState<string | null>(null);
 
   const checkHealth = useCallback(async () => {
     try {
       const h = await fetchHealth();
+      setCatalogReachable(h.catalog_service === "reachable");
+      setPricingReachable(h.pricing_service === "reachable");
       setCartReachable(h.cart_service === "reachable");
       setPaymentsReachable(h.payments_service === "reachable");
-      setInventoryReachable(h.inventory_service === "reachable");
     } catch {
+      setCatalogReachable(false);
+      setPricingReachable(false);
       setCartReachable(false);
       setPaymentsReachable(false);
-      setInventoryReachable(false);
     }
   }, []);
 
-  const loadInventory = useCallback(async () => {
+  const loadProducts = useCallback(async () => {
     try {
-      setActiveService("inventory");
-      const res = await fetchInventory();
-      setProducts(res.data.products);
-      setInventoryHeaders(res.lattice_headers);
+      const [catalogRes, pricingRes] = await Promise.all([fetchCatalog(), fetchPricing()]);
+      setCatalogHeaders(catalogRes.lattice_headers);
+      setPricingHeaders(pricingRes.lattice_headers);
+
+      const priceMap = new Map(pricingRes.data.prices.map(p => [p.sku, p.price]));
+      const merged: Product[] = catalogRes.data.products.map(p => ({
+        ...p,
+        price: priceMap.get(p.sku),
+      }));
+      setProducts(merged);
     } catch { /* silent */ }
-    setActiveService(null);
   }, []);
 
   const loadCart = useCallback(async () => {
     try {
-      setActiveService("cart");
       const res = await fetchCart();
       setCartItems(res.data.items);
       setCartTotal(res.data.total);
       setCartCount(res.data.count);
       setCartHeaders(res.lattice_headers);
     } catch { /* silent */ }
-    setActiveService(null);
   }, []);
 
   useEffect(() => {
@@ -72,8 +78,8 @@ function App() {
   }, [checkHealth]);
 
   useEffect(() => {
-    if (inventoryReachable && products.length === 0) loadInventory();
-  }, [inventoryReachable, products.length, loadInventory]);
+    if (catalogReachable && pricingReachable && products.length === 0) loadProducts();
+  }, [catalogReachable, pricingReachable, products.length, loadProducts]);
 
   useEffect(() => {
     if (!toast) return;
@@ -82,7 +88,7 @@ function App() {
   }, [toast]);
 
   const handleAddToCart = useCallback(async (product: Product) => {
-    if (adding) return;
+    if (adding || !product.price) return;
     setAdding(product.sku);
     try {
       const res = await addToCart(product.sku, product.name, product.price);
@@ -100,26 +106,23 @@ function App() {
 
   const handleBackToShop = useCallback(() => {
     setView("shop");
-    setPaymentResult(null);
+    setCheckoutResult(null);
   }, []);
 
-  const handlePay = useCallback(async () => {
+  const handleCheckout = useCallback(async () => {
     setPaying(true);
-    setActiveService("payments");
     try {
-      const result = await processPayment(cartItems, cartTotal);
-      await clearCart();
-      setPaymentResult(result);
+      const result = await checkout();
+      setCheckoutResult(result);
       setCartItems([]);
       setCartTotal(0);
       setCartCount(0);
       setView("confirmation");
     } catch (err) {
-      setToast(err instanceof ApiError ? err.message : "Payment failed");
+      setToast(err instanceof ApiError ? err.message : "Checkout failed");
     }
     setPaying(false);
-    setActiveService(null);
-  }, [cartItems, cartTotal]);
+  }, []);
 
   const handleClearCart = useCallback(async () => {
     try {
@@ -129,6 +132,8 @@ function App() {
       setCartCount(0);
     } catch { /* silent */ }
   }, []);
+
+  const servicesReachable = catalogReachable && pricingReachable;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
@@ -157,30 +162,31 @@ function App() {
       <main className="flex flex-1 overflow-hidden">
         <section className="w-1/2 p-4 flex flex-col overflow-hidden border-r border-slate-800">
           {view === "shop" ? (
-            !inventoryReachable ? (
-              <NoConnectivityMessage service="Inventory" />
+            !servicesReachable ? (
+              <NoConnectivityMessage service="Items" />
             ) : (
-              <ProductGrid products={products} latticeHeaders={inventoryHeaders} onAddToCart={handleAddToCart} adding={adding} />
+              <ProductGrid products={products} catalogHeaders={catalogHeaders} pricingHeaders={pricingHeaders} onAddToCart={handleAddToCart} adding={adding} />
             )
           ) : view === "cart" ? (
             !cartReachable ? (
               <NoConnectivityMessage service="Cart" />
             ) : (
-              <CartView items={cartItems} total={cartTotal} latticeHeaders={cartHeaders} onPay={handlePay} onClear={handleClearCart} paying={paying} />
+              <CartView items={cartItems} total={cartTotal} latticeHeaders={cartHeaders} onPay={handleCheckout} onClear={handleClearCart} paying={paying} />
             )
           ) : (
-            paymentResult && (
-              <PaymentConfirmationView payment={paymentResult} onBackToShop={handleBackToShop} />
+            checkoutResult && (
+              <PaymentConfirmationView payment={checkoutResult} onBackToShop={handleBackToShop} />
             )
           )}
         </section>
 
         <section className="w-1/2 p-4 overflow-hidden">
           <ArchitectureDiagram
+            catalogReachable={catalogReachable}
+            pricingReachable={pricingReachable}
             cartReachable={cartReachable}
             paymentsReachable={paymentsReachable}
-            inventoryReachable={inventoryReachable}
-            activeService={activeService}
+            activeView={view}
           />
         </section>
       </main>

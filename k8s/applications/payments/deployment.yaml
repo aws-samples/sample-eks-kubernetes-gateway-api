@@ -26,7 +26,8 @@ spec:
           matchLabels:
             app: payments-service
       containers:
-        image: <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/eks-gateway-demo/payments-service:latest
+      - name: payments-service
+        image: <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/eks-gateway-demo/payments:latest
         imagePullPolicy: Always
         ports:
         - containerPort: 8000
@@ -35,7 +36,7 @@ spec:
             cpu: 50m
             memory: 64Mi
           limits:
-            memory: 256Mi   # no CPU limit — fractional limits cause throttling; requests handle scheduling
+            memory: 256Mi
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true

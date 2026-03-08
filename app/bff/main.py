@@ -1,15 +1,19 @@
 """BFF Service — FastAPI Backend-for-Frontend.
 
-Orchestrates calls to Cart, Payments, and Inventory services via VPC Lattice.
-All requests are signed with SigV4 for VPC Lattice IAM authentication.
+Orchestrates calls to Catalog, Pricing, and Cart services via VPC Lattice.
+All outbound requests to VPC Lattice are signed with SigV4 for IAM authentication.
 
-Cart and Inventory share a single VPC Lattice service ("items") and are
-differentiated by the x-service header. Payments is a separate service.
+Service routing:
+  - Catalog and Pricing share a VPC Lattice Gateway on Backend-A with header-based routing.
+    The BFF sends requests to items.<domain> with an x-service header (catalog or pricing).
+  - Cart is a separate VPC Lattice service on Backend-B.
+  - Payments runs on the same cluster (Edge) and is called intra-cluster by the Cart
+    service during checkout. The BFF never calls Payments directly.
 
 Architecture note:
-  Browser → nginx (frontend) → BFF → VPC Lattice → Cart / Inventory / Payments
-  The BFF is the only component that holds AWS credentials (via EKS Pod Identity).
-  It signs every outbound request with SigV4 so the browser never touches AWS auth.
+  Browser → nginx (frontend) → BFF → VPC Lattice → Catalog / Pricing / Cart
+  The BFF is the only component on the Edge cluster that holds AWS credentials
+  (via EKS Pod Identity) for calling VPC Lattice services.
 
 HTTP client lifecycle:
   A single httpx.AsyncClient is created at application startup via FastAPI's
@@ -32,41 +36,34 @@ from botocore.session import Session as BotocoreSession
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-from models import AddToCartRequest, BFFResponse, HealthStatus, LatticeHeaders, PaymentRequest
+from models import AddToCartRequest, BFFResponse, CheckoutResponse, HealthStatus, LatticeHeaders
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
 ITEMS_SERVICE_URL = os.environ.get("ITEMS_SERVICE_URL", "https://items.lattice.internal")
+CART_SERVICE_URL = os.environ.get("CART_SERVICE_URL", "https://cart.lattice.internal")
 PAYMENTS_SERVICE_URL = os.environ.get("PAYMENTS_SERVICE_URL", "https://payments.lattice.internal")
 REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "10"))
-HEALTH_TIMEOUT = float(os.environ.get("HEALTH_TIMEOUT", "3"))
+HEALTH_TIMEOUT = float(os.environ.get("HEALTH_TIMEOUT", "5"))
 AWS_REGION = os.environ.get("AWS_REGION", "eu-west-1")
 
-# Single botocore session reused across all requests — avoids re-reading credentials on every call.
+# Single botocore session reused across all requests.
 _botocore_session = BotocoreSession()
 
-# Shared HTTP client — set during lifespan startup, used by all endpoint handlers.
+# Shared HTTP clients — set during lifespan startup.
 _http_client: httpx.AsyncClient | None = None
-_health_client: httpx.AsyncClient | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manage the lifecycle of shared HTTP clients.
-
-    Creating clients here (rather than per-request) allows httpx to maintain
-    a connection pool. Connections to VPC Lattice are reused across requests,
-    eliminating repeated TCP and TLS handshake overhead.
-    """
-    global _http_client, _health_client
+    """Manage the lifecycle of shared HTTP clients."""
+    global _http_client
     _http_client = httpx.AsyncClient(timeout=REQUEST_TIMEOUT)
-    _health_client = httpx.AsyncClient(timeout=HEALTH_TIMEOUT)
-    logger.info("HTTP clients initialised (timeout=%.1fs, health_timeout=%.1fs)", REQUEST_TIMEOUT, HEALTH_TIMEOUT)
+    logger.info("HTTP client initialised (timeout=%.1fs, health_timeout=%.1fs)", REQUEST_TIMEOUT, HEALTH_TIMEOUT)
     yield
     await _http_client.aclose()
-    await _health_client.aclose()
-    logger.info("HTTP clients closed")
+    logger.info("HTTP client closed")
 
 
 app = FastAPI(title="E-Commerce Platform BFF", lifespan=lifespan)
@@ -75,132 +72,140 @@ app = FastAPI(title="E-Commerce Platform BFF", lifespan=lifespan)
 def _sign_request(method: str, url: str, headers: dict | None = None, data: str | None = None) -> dict:
     """Sign an HTTP request with AWS SigV4 for VPC Lattice IAM authentication.
 
-    VPC Lattice requires the 'vpc-lattice-svcs' service name in the signature.
-    Credentials are obtained automatically from the EKS Pod Identity token
-    mounted at /var/run/secrets/pods.eks.amazonaws.com/serviceaccount/.
+    VPC Lattice does not support payload signing, so we must include
+    x-amz-content-sha256: UNSIGNED-PAYLOAD and disable payload signing.
+    See: https://docs.aws.amazon.com/vpc-lattice/latest/ug/sigv4-authenticated-requests.html
     """
-    if headers is None:
-        headers = {}
-    # UNSIGNED-PAYLOAD avoids hashing the body, which is acceptable for VPC Lattice
-    # and avoids issues with streaming or large payloads.
+    headers = dict(headers or {})
     headers["x-amz-content-sha256"] = "UNSIGNED-PAYLOAD"
-    request = AWSRequest(method=method, url=url, headers=headers, data=data or "")
-    request.context["payload_signing_enabled"] = False
+    aws_request = AWSRequest(method=method, url=url, headers=headers, data=data or "")
+    aws_request.context["payload_signing_enabled"] = False
     credentials = _botocore_session.get_credentials()
-    SigV4Auth(credentials, "vpc-lattice-svcs", AWS_REGION).add_auth(request)
-    signed = dict(request.headers)
-    # Remove 'host' — the downstream HTTP client sets this from the URL.
-    signed.pop("host", None)
-    signed.pop("Host", None)
-    return signed
+    SigV4Auth(credentials, "vpc-lattice-svcs", AWS_REGION).add_auth(aws_request)
+    return dict(aws_request.headers)
 
 
-def _build_lattice_headers(raw: dict | None) -> LatticeHeaders:
-    return LatticeHeaders(headers=raw or {})
+async def _lattice_request(method: str, url: str, json_body: str | None = None, extra_headers: dict | None = None) -> dict:
+    """Make a SigV4-signed request to a VPC Lattice service."""
+    headers = {}
+    if json_body:
+        headers["Content-Type"] = "application/json"
+    if extra_headers:
+        headers.update(extra_headers)
+    signed_headers = _sign_request(method, url, headers, json_body)
+    resp = await _http_client.request(method, url, content=json_body, headers=signed_headers)
+    resp.raise_for_status()
+    return resp.json()
 
 
-# ── Inventory ────────────────────────────────────────────────────────────────
-
-@app.get("/api/inventory")
-async def get_inventory():
-    full_url = f"{ITEMS_SERVICE_URL}/inventory"
+async def _check_service(url: str, extra_headers: dict | None = None) -> str:
+    """Check if a VPC Lattice service is reachable."""
     try:
-        headers = _sign_request("GET", full_url, {"x-service": "inventory"})
-        resp = await _http_client.get(full_url, headers=headers)
-    except (httpx.ConnectError, httpx.TimeoutException):
-        logger.error("Inventory service unreachable at %s", full_url)
-        return JSONResponse(status_code=503, content={"error": "Inventory unreachable"})
-    if resp.status_code != 200:
-        return JSONResponse(status_code=resp.status_code, content={"error": f"Inventory returned {resp.status_code}"})
-    body = resp.json()
-    return BFFResponse(data=body.get("data", {}), lattice_headers=_build_lattice_headers(body.get("lattice_headers")), timestamp=datetime.now(timezone.utc).isoformat())
-
-
-# ── Cart ─────────────────────────────────────────────────────────────────────
-
-@app.get("/api/cart")
-async def get_cart():
-    # x-service header routes this request to the cart backend via VPC Lattice header-based routing
-    full_url = f"{ITEMS_SERVICE_URL}/cart"
-    try:
-        headers = _sign_request("GET", full_url, {"x-service": "cart"})
-        resp = await _http_client.get(full_url, headers=headers)
-    except (httpx.ConnectError, httpx.TimeoutException):
-        logger.error("Cart service unreachable at %s", full_url)
-        return JSONResponse(status_code=503, content={"error": "Cart unreachable"})
-    if resp.status_code != 200:
-        return JSONResponse(status_code=resp.status_code, content={"error": f"Cart returned {resp.status_code}"})
-    body = resp.json()
-    return BFFResponse(data=body.get("data", {}), lattice_headers=_build_lattice_headers(body.get("lattice_headers")), timestamp=datetime.now(timezone.utc).isoformat())
-
-
-@app.post("/api/cart")
-async def add_to_cart(item: AddToCartRequest):
-    """Add an item to the cart. Validates the request body before forwarding to the cart service."""
-    payload = item.model_dump_json().encode()
-    full_url = f"{ITEMS_SERVICE_URL}/cart"
-    try:
-        headers = _sign_request("POST", full_url, {"x-service": "cart", "Content-Type": "application/json"}, item.model_dump_json())
-        resp = await _http_client.post(full_url, content=payload, headers=headers)
-    except (httpx.ConnectError, httpx.TimeoutException):
-        logger.error("Cart service unreachable at %s", full_url)
-        return JSONResponse(status_code=503, content={"error": "Cart unreachable"})
-    return JSONResponse(status_code=resp.status_code, content=resp.json())
-
-
-@app.delete("/api/cart")
-async def clear_cart():
-    full_url = f"{ITEMS_SERVICE_URL}/cart"
-    try:
-        headers = _sign_request("DELETE", full_url, {"x-service": "cart"})
-        resp = await _http_client.delete(full_url, headers=headers)
-    except (httpx.ConnectError, httpx.TimeoutException):
-        logger.error("Cart service unreachable at %s", full_url)
-        return JSONResponse(status_code=503, content={"error": "Cart unreachable"})
-    return JSONResponse(status_code=resp.status_code, content=resp.json())
-
-
-# ── Payments ─────────────────────────────────────────────────────────────────
-
-@app.post("/api/payments")
-async def process_payment(payment: PaymentRequest):
-    """Process a payment. Validates the request body before forwarding to the payments service."""
-    payload = payment.model_dump_json().encode()
-    full_url = f"{PAYMENTS_SERVICE_URL}/payments"
-    try:
-        headers = _sign_request("POST", full_url, {"Content-Type": "application/json"}, payment.model_dump_json())
-        resp = await _http_client.post(full_url, content=payload, headers=headers)
-    except (httpx.ConnectError, httpx.TimeoutException):
-        logger.error("Payments service unreachable at %s", full_url)
-        return JSONResponse(status_code=503, content={"error": "Payments unreachable"})
-    if resp.status_code != 200:
-        return JSONResponse(status_code=resp.status_code, content={"error": f"Payments returned {resp.status_code}"})
-    body = resp.json()
-    return BFFResponse(data=body.get("data", {}), lattice_headers=_build_lattice_headers(body.get("lattice_headers")), timestamp=datetime.now(timezone.utc).isoformat())
+        headers = dict(extra_headers or {})
+        signed = _sign_request("GET", url, headers)
+        resp = await _http_client.get(url, headers=signed, timeout=HEALTH_TIMEOUT)
+        return "reachable" if resp.status_code == 200 else "unreachable"
+    except Exception:
+        return "unreachable"
 
 
 # ── Health ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/health")
 async def health():
-    async def check_items(service_name: str) -> str:
-        full_url = f"{ITEMS_SERVICE_URL}/health"
-        try:
-            headers = _sign_request("GET", full_url, {"x-service": service_name})
-            resp = await _health_client.get(full_url, headers=headers)
-            return "reachable" if resp.status_code == 200 else "unreachable"
-        except (httpx.ConnectError, httpx.TimeoutException):
-            return "unreachable"
+    catalog_url = f"{ITEMS_SERVICE_URL}/health"
+    pricing_url = f"{ITEMS_SERVICE_URL}/health"
+    cart_url = f"{CART_SERVICE_URL}/health"
+    payments_url = f"{PAYMENTS_SERVICE_URL}/health"
 
-    async def check(url: str, path: str) -> str:
-        try:
-            headers = _sign_request("GET", f"{url}{path}")
-            resp = await _health_client.get(f"{url}{path}", headers=headers)
-            return "reachable" if resp.status_code == 200 else "unreachable"
-        except (httpx.ConnectError, httpx.TimeoutException):
-            return "unreachable"
-
-    cart_status, inventory_status, payments_status = await asyncio.gather(
-        check_items("cart"), check_items("inventory"), check(PAYMENTS_SERVICE_URL, "/health"),
+    results = await asyncio.gather(
+        _check_service(catalog_url, {"x-service": "catalog"}),
+        _check_service(pricing_url, {"x-service": "pricing"}),
+        _check_service(cart_url),
+        _check_service(payments_url),
+        return_exceptions=True,
     )
-    return HealthStatus(cart_service=cart_status, payments_service=payments_status, inventory_service=inventory_status)
+
+    return HealthStatus(
+        catalog_service=results[0] if isinstance(results[0], str) else "unreachable",
+        pricing_service=results[1] if isinstance(results[1], str) else "unreachable",
+        cart_service=results[2] if isinstance(results[2], str) else "unreachable",
+        payments_service=results[3] if isinstance(results[3], str) else "unreachable",
+    )
+
+
+# ── Catalog ──────────────────────────────────────────────────────────────────
+
+@app.get("/api/catalog")
+async def get_catalog():
+    try:
+        data = await _lattice_request("GET", f"{ITEMS_SERVICE_URL}/catalog", extra_headers={"x-service": "catalog"})
+        return data
+    except Exception as e:
+        logger.error("Catalog request failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=502)
+
+
+# ── Pricing ──────────────────────────────────────────────────────────────────
+
+@app.get("/api/pricing")
+async def get_pricing():
+    try:
+        data = await _lattice_request("GET", f"{ITEMS_SERVICE_URL}/pricing", extra_headers={"x-service": "pricing"})
+        return data
+    except Exception as e:
+        logger.error("Pricing request failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=502)
+
+
+# ── Cart ─────────────────────────────────────────────────────────────────────
+
+@app.get("/api/cart")
+async def get_cart():
+    try:
+        data = await _lattice_request("GET", f"{CART_SERVICE_URL}/cart")
+        return data
+    except Exception as e:
+        logger.error("Cart GET failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=502)
+
+
+@app.post("/api/cart")
+async def add_to_cart(item: AddToCartRequest):
+    try:
+        import json
+        body = json.dumps(item.model_dump())
+        data = await _lattice_request("POST", f"{CART_SERVICE_URL}/cart", body)
+        return data
+    except Exception as e:
+        logger.error("Cart POST failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=502)
+
+
+@app.delete("/api/cart")
+async def clear_cart():
+    try:
+        data = await _lattice_request("DELETE", f"{CART_SERVICE_URL}/cart")
+        return data
+    except Exception as e:
+        logger.error("Cart DELETE failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=502)
+
+
+# ── Checkout ─────────────────────────────────────────────────────────────────
+
+@app.post("/api/checkout")
+async def checkout():
+    """Trigger checkout via the Cart service.
+
+    The Cart service on Backend-B handles the full checkout flow:
+    it reads the cart, calls Payments on the Edge cluster through VPC Lattice,
+    clears the cart on success, and returns the result with Lattice headers
+    from both hops (cart + payments).
+    """
+    try:
+        data = await _lattice_request("POST", f"{CART_SERVICE_URL}/cart/checkout")
+        return data
+    except Exception as e:
+        logger.error("Checkout failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=502)

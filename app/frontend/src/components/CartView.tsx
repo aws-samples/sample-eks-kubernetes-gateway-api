@@ -52,16 +52,16 @@ export default function CartView({ items, total, latticeHeaders, onPay, onClear,
           </button>
         </div>
 
-        {latticeHeaders && Object.keys(latticeHeaders.headers).length > 0 && (
+        {latticeHeaders && Object.keys(latticeHeaders).length > 0 && (
           <button onClick={() => setShowHeaders(true)}
             className="shrink-0 w-full py-1.5 rounded border border-purple-500/30 text-xs text-purple-300 hover:bg-purple-500/10 transition-colors">
-            View VPC Lattice Headers
+            View Cart VPC Lattice headers
           </button>
         )}
       </div>
 
       {showHeaders && latticeHeaders && (
-        <HeadersModal headers={latticeHeaders.headers} onClose={() => setShowHeaders(false)} />
+        <HeadersModal headers={latticeHeaders} onClose={() => setShowHeaders(false)} title="Cart VPC Lattice headers — BFF → Cart VPC Lattice service" />
       )}
     </>
   );

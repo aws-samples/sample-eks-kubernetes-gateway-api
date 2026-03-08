@@ -46,7 +46,11 @@ resource "aws_route53_zone" "private_hz" {
   name = var.private_hosted_zone_name
 
   vpc {
-    vpc_id = module.frontend_vpc.vpc_attributes.id
+    vpc_id = module.edge_vpc.vpc_attributes.id
+  }
+
+  vpc {
+    vpc_id = module.backend_b_vpc.vpc_attributes.id
   }
 
   tags = {

@@ -1,15 +1,18 @@
 import { useState } from "react";
-import type { PaymentConfirmation as PaymentData } from "../types";
+import type { CheckoutResponse } from "../types";
 import HeadersModal from "./HeadersModal";
 
 interface Props {
-  payment: PaymentData;
+  payment: CheckoutResponse;
   onBackToShop: () => void;
 }
 
 export default function PaymentConfirmationView({ payment, onBackToShop }: Props) {
-  const [showHeaders, setShowHeaders] = useState(false);
+  const [showHeaders, setShowHeaders] = useState<"cart" | "payments" | null>(null);
   const d = payment.data;
+
+  const cartHeaders = payment.lattice_headers;
+  const paymentsHeaders = payment.downstream_lattice_headers?.payments;
 
   return (
     <>
@@ -41,16 +44,27 @@ export default function PaymentConfirmationView({ payment, onBackToShop }: Props
           🦄 Back to Shop
         </button>
 
-        {payment.lattice_headers && Object.keys(payment.lattice_headers.headers).length > 0 && (
-          <button onClick={() => setShowHeaders(true)}
-            className="py-1.5 px-4 rounded border border-purple-500/30 text-xs text-purple-300 hover:bg-purple-500/10 transition-colors">
-            View VPC Lattice Headers
-          </button>
-        )}
+        <div className="flex gap-2">
+          {cartHeaders && Object.keys(cartHeaders).length > 0 && (
+            <button onClick={() => setShowHeaders("cart")}
+              className="py-1.5 px-4 rounded border border-purple-500/30 text-xs text-purple-300 hover:bg-purple-500/10 transition-colors">
+              Cart checkout VPC Lattice headers (hop 1)
+            </button>
+          )}
+          {paymentsHeaders && Object.keys(paymentsHeaders).length > 0 && (
+            <button onClick={() => setShowHeaders("payments")}
+              className="py-1.5 px-4 rounded border border-blue-500/30 text-xs text-blue-300 hover:bg-blue-500/10 transition-colors">
+              Payments VPC Lattice headers (hop 2)
+            </button>
+          )}
+        </div>
       </div>
 
-      {showHeaders && payment.lattice_headers && (
-        <HeadersModal headers={payment.lattice_headers.headers} onClose={() => setShowHeaders(false)} />
+      {showHeaders === "cart" && cartHeaders && (
+        <HeadersModal headers={cartHeaders} onClose={() => setShowHeaders(null)} title="Cart checkout VPC Lattice headers (hop 1) — BFF → Cart VPC Lattice service" />
+      )}
+      {showHeaders === "payments" && paymentsHeaders && (
+        <HeadersModal headers={paymentsHeaders} onClose={() => setShowHeaders(null)} title="Payments VPC Lattice headers (hop 2) — Cart → Payments VPC Lattice service" />
       )}
     </>
   );

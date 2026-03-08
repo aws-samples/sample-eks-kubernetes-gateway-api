@@ -15,10 +15,10 @@
 #   ├─────────────────────────────┼──────────────────────────────────────────────────────────┤
 #   │ eks_cluster                 │ EKS control plane (shared by all 3 clusters)             │
 #   │ eks_node_group              │ EKS Auto Mode worker nodes (shared by all 3 clusters)    │
-#   │ gateway_api_controller      │ VPC Lattice Gateway API Controller (backend clusters)    │
-#   │ aws_lbc                     │ AWS Load Balancer Controller (frontend cluster)          │
-#   │ bff_pod                     │ BFF service — SigV4 signing for VPC Lattice (frontend)   │
-#   │ external_dns                │ ExternalDNS — Route 53 record management (frontend)      │
+#   │ gateway_api_controller      │ VPC Lattice Gateway API Controller (edge + backends)     │
+#   │ aws_lbc                     │ AWS Load Balancer Controller (edge cluster)              │
+#   │ bff_pod                     │ BFF service — SigV4 signing for VPC Lattice (edge)       │
+#   │ external_dns                │ ExternalDNS — Route 53 record management (all clusters)  │
 #   └─────────────────────────────┴──────────────────────────────────────────────────────────┘
 #
 # =============================================================================
@@ -118,7 +118,7 @@ resource "aws_iam_role_policy_attachment" "eks_container_registry_pull_only" {
 }
 
 # =============================================================================
-# VPC Lattice Gateway API Controller Role — backend clusters (backend-a, backend-b)
+# VPC Lattice Gateway API Controller Role — edge and backend clusters
 # Allows the controller to manage VPC Lattice services, target groups, and
 # service network associations via the Gateway API CRDs.
 # =============================================================================
@@ -189,7 +189,7 @@ resource "aws_iam_role_policy" "gateway_api_controller" {
 }
 
 # =============================================================================
-# AWS Load Balancer Controller Role — frontend cluster only
+# AWS Load Balancer Controller Role — edge cluster only
 # Allows the self-managed AWS LBC (installed via Helm with Gateway API feature
 # gates) to provision and manage ALBs/NLBs. Not part of EKS Auto Mode.
 # Reference: https://github.com/kubernetes-sigs/aws-load-balancer-controller/blob/v3.1.0/docs/install/iam_policy.json
@@ -454,14 +454,14 @@ resource "aws_iam_role_policy" "aws_lbc" {
 }
 
 resource "aws_eks_pod_identity_association" "aws_lbc" {
-  cluster_name    = aws_eks_cluster.frontend.name
+  cluster_name    = aws_eks_cluster.edge.name
   namespace       = "kube-system"
   service_account = "aws-load-balancer-controller"
   role_arn        = aws_iam_role.aws_lbc.arn
 }
 
 # =============================================================================
-# BFF Pod Role — frontend cluster only
+# BFF Pod Role — edge cluster only
 # Allows the BFF service to sign requests with SigV4 for VPC Lattice IAM auth.
 # =============================================================================
 
@@ -486,7 +486,7 @@ resource "aws_iam_role_policy" "bff_lattice_invoke" {
 }
 
 resource "aws_eks_pod_identity_association" "bff" {
-  cluster_name    = aws_eks_cluster.frontend.name
+  cluster_name    = aws_eks_cluster.edge.name
   namespace       = "default"
   service_account = "bff-service-account"
   role_arn        = aws_iam_role.bff_pod.arn
@@ -495,7 +495,7 @@ resource "aws_eks_pod_identity_association" "bff" {
 # =============================================================================
 # ExternalDNS Role — all clusters
 # Watches Gateway/HTTPRoute resources and creates Route 53 records.
-# Frontend cluster: ALIAS records in the public hosted zone (ALB)
+# Edge cluster: ALIAS records in the public hosted zone (ALB)
 # Backend clusters: CNAME records in the private hosted zone (VPC Lattice)
 # =============================================================================
 
@@ -533,8 +533,8 @@ resource "aws_iam_role_policy" "external_dns" {
 }
 
 # Pod Identity — one per cluster
-resource "aws_eks_pod_identity_association" "external_dns_frontend" {
-  cluster_name    = aws_eks_cluster.frontend.name
+resource "aws_eks_pod_identity_association" "external_dns_edge" {
+  cluster_name    = aws_eks_cluster.edge.name
   namespace       = "external-dns"
   service_account = "external-dns"
   role_arn        = aws_iam_role.external_dns.arn
@@ -552,4 +552,21 @@ resource "aws_eks_pod_identity_association" "external_dns_backend_b" {
   namespace       = "external-dns"
   service_account = "external-dns"
   role_arn        = aws_iam_role.external_dns.arn
+}
+
+# =============================================================================
+# Cart Pod Role — Backend-B cluster
+# Allows the cart service to call Payments via VPC Lattice with SigV4 signing.
+# =============================================================================
+
+resource "aws_iam_role" "cart_pod" {
+  name               = "${var.project_prefix}-cart-pod-role"
+  assume_role_policy = data.aws_iam_policy_document.pod_identity_assume_role.json
+  tags               = { Name = "${var.project_prefix}-cart-pod-role" }
+}
+
+resource "aws_iam_role_policy" "cart_lattice_invoke" {
+  name   = "${var.project_prefix}-cart-lattice-invoke"
+  role   = aws_iam_role.cart_pod.id
+  policy = data.aws_iam_policy_document.bff_lattice_invoke.json
 }

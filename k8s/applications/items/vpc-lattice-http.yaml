@@ -1,18 +1,12 @@
-# VPC Lattice resources for the "items" service (Backend A Cluster) — HTTP mode
+# VPC Lattice resources for Items service (Backend-A) — HTTP mode
 #
-# WARNING: HTTP mode is intended for test environments only.
-# Traffic between the BFF and the VPC Lattice service is unencrypted.
-# Use vpc-lattice-https.yaml for production deployments.
+# Single VPC Lattice service at items.<domain> with header-based routing:
+#   x-service: catalog → catalog-service
+#   x-service: pricing → pricing-service
 #
-# Placeholders:
-#   <ITEMS_HOSTNAME>        — e.g. items.blueprints.example.com
-#   <SERVICE_NETWORK_NAME>  — VPC Lattice service network name
-#   <ITEMS_LOG_GROUP_ARN>   — CloudWatch log group ARN for access logs
-#
+# Placeholders: <ITEMS_HOSTNAME>, <SERVICE_NETWORK_NAME>, <ITEMS_LOG_GROUP_ARN>
 # =============================================================================
-# VpcAssociationPolicy — prevent the controller from associating the backend
-# cluster VPC with the service network. These clusters only serve traffic
-# (targets registered by IP), they don't consume services from the network.
+# VpcAssociationPolicy — Backend-A only serves traffic, doesn't consume
 # =============================================================================
 ---
 apiVersion: application-networking.k8s.aws/v1alpha1
@@ -26,7 +20,7 @@ spec:
     name: <SERVICE_NETWORK_NAME>
   associateWithVpc: false
 # =============================================================================
-# Gateway — single VPC Lattice service for items (HTTP listener)
+# Gateway — single VPC Lattice service for items (HTTP)
 # =============================================================================
 ---
 apiVersion: gateway.networking.k8s.io/v1
@@ -34,19 +28,19 @@ kind: Gateway
 metadata:
   name: <SERVICE_NETWORK_NAME>
 spec:
-  gatewayClassName: amazon-vpc-lattice
+  gatewayClassName: amazon-vpclattice-controller
   listeners:
   - name: http
     protocol: HTTP
     port: 80
 # =============================================================================
-# HTTPRoute — header-based routing: x-service: cart | inventory
+# HTTPRoute — header-based routing: x-service: catalog | pricing
 # =============================================================================
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: items-service-route
+  name: items-route
 spec:
   hostnames:
   - "<ITEMS_HOSTNAME>"
@@ -57,17 +51,17 @@ spec:
   - matches:
     - headers:
       - name: x-service
-        value: cart
+        value: catalog
     backendRefs:
-    - name: cart-service
+    - name: catalog-service
       kind: Service
       port: 8000
   - matches:
     - headers:
       - name: x-service
-        value: inventory
+        value: pricing
     backendRefs:
-    - name: inventory-service
+    - name: pricing-service
       kind: Service
       port: 8000
 # =============================================================================
@@ -77,12 +71,12 @@ spec:
 apiVersion: application-networking.k8s.aws/v1alpha1
 kind: TargetGroupPolicy
 metadata:
-  name: cart-service-tgp
+  name: catalog-service-tgp
 spec:
   targetRef:
     group: ""
     kind: Service
-    name: cart-service
+    name: catalog-service
   protocol: HTTP
   protocolVersion: HTTP1
   healthCheck:
@@ -100,12 +94,12 @@ spec:
 apiVersion: application-networking.k8s.aws/v1alpha1
 kind: TargetGroupPolicy
 metadata:
-  name: inventory-service-tgp
+  name: pricing-service-tgp
 spec:
   targetRef:
     group: ""
     kind: Service
-    name: inventory-service
+    name: pricing-service
   protocol: HTTP
   protocolVersion: HTTP1
   healthCheck:
@@ -120,7 +114,7 @@ spec:
     healthyThresholdCount: 2
     unhealthyThresholdCount: 3
 # =============================================================================
-# IAMAuthPolicy — applied to the single HTTPRoute
+# IAMAuthPolicy
 # =============================================================================
 ---
 apiVersion: application-networking.k8s.aws/v1alpha1
@@ -131,7 +125,7 @@ spec:
   targetRef:
     group: "gateway.networking.k8s.io"
     kind: HTTPRoute
-    name: items-service-route
+    name: items-route
   policy: |
     {
       "Version": "2012-10-17",
@@ -139,17 +133,12 @@ spec:
         "Effect": "Allow",
         "Principal": "*",
         "Resource": "*",
-        "Condition": {
-            "StringNotEqualsIgnoreCase": {
-                "aws:PrincipalType": "anonymous"
-            }
-        },
+        "Condition": { "StringNotEqualsIgnoreCase": { "aws:PrincipalType": "anonymous" } },
         "Action": "*"
       }]
     }
-    
 # =============================================================================
-# AccessLogPolicy — single log destination for the items service
+# AccessLogPolicy
 # =============================================================================
 ---
 apiVersion: application-networking.k8s.aws/v1alpha1
@@ -161,4 +150,4 @@ spec:
   targetRef:
     group: gateway.networking.k8s.io
     kind: HTTPRoute
-    name: items-service-route
+    name: items-route

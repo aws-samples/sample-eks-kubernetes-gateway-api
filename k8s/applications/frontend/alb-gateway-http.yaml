@@ -21,7 +21,7 @@ kind: Gateway
 metadata:
   name: frontend-gateway
 spec:
-  gatewayClassName: aws-alb
+  gatewayClassName: aws-lb-controller
   infrastructure:
     parametersRef:
       group: gateway.k8s.aws
@@ -39,6 +39,8 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
   name: frontend-route
+  annotations:
+    external-dns/zone: public
 spec:
   parentRefs:
   - name: frontend-gateway

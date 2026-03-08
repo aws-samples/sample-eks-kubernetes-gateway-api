@@ -38,7 +38,7 @@ PROJECT_PREFIX="${PROJECT_PREFIX:-eks-gateway-demo}"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 ECR_BASE="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 
-FRONTEND_CLUSTER="${PROJECT_PREFIX}-frontend-cluster"
+EDGE_CLUSTER="${PROJECT_PREFIX}-edge-cluster"
 BACKEND_A_CLUSTER="${PROJECT_PREFIX}-backend-a-cluster"
 BACKEND_B_CLUSTER="${PROJECT_PREFIX}-backend-b-cluster"
 
@@ -108,9 +108,10 @@ deploy_ecr() {
   terraform -chdir="${INFRA_DIR}" apply -auto-approve -input=false \
     -target=aws_ecr_repository.frontend \
     -target=aws_ecr_repository.bff \
-    -target=aws_ecr_repository.cart_service \
-    -target=aws_ecr_repository.inventory_service \
-    -target=aws_ecr_repository.payments_service \
+    -target=aws_ecr_repository.payments \
+    -target=aws_ecr_repository.catalog \
+    -target=aws_ecr_repository.pricing \
+    -target=aws_ecr_repository.cart \
     | grep -E '(Apply complete|aws_ecr_repository)' || true
   success "ECR repositories ready"
 }
@@ -124,7 +125,7 @@ deploy_images() {
     docker login --username AWS --password-stdin "${ECR_BASE}" 2>/dev/null
   success "Docker authenticated"
 
-  local services=("frontend" "bff" "cart-service" "inventory-service" "payments-service")
+  local services=("frontend" "bff" "payments" "catalog" "pricing" "cart")
   for svc in "${services[@]}"; do
     step "Building & pushing ${svc} (linux/arm64)..."
     docker build --platform linux/arm64 -q \
@@ -153,7 +154,9 @@ deploy_infra() {
   TF_PRIVATE_HZ_ID=$(terraform -chdir="${INFRA_DIR}" output -raw private_hosted_zone_id)
   TF_ITEMS_LOG_GROUP_ARN=$(terraform -chdir="${INFRA_DIR}" output -raw items_service_log_group_arn)
   TF_PAYMENTS_LOG_GROUP_ARN=$(terraform -chdir="${INFRA_DIR}" output -raw payments_service_log_group_arn)
+  TF_CART_LOG_GROUP_ARN=$(terraform -chdir="${INFRA_DIR}" output -raw cart_service_log_group_arn)
   TF_WAF_ACL_ARN=$(terraform -chdir="${INFRA_DIR}" output -raw frontend_waf_acl_arn)
+  TF_EDGE_VPC_ID=$(terraform -chdir="${INFRA_DIR}" output -raw edge_vpc_id)
   TF_BACKEND_A_VPC_ID=$(terraform -chdir="${INFRA_DIR}" output -raw backend_a_vpc_id)
   TF_BACKEND_B_VPC_ID=$(terraform -chdir="${INFRA_DIR}" output -raw backend_b_vpc_id)
   success "Outputs cached"
@@ -185,7 +188,7 @@ deploy_cluster_config() {
   step "Installing Gateway API Controller for VPC Lattice (Helm)..."
   aws ecr-public get-login-password --region us-east-1 2>/dev/null | \
     helm registry login --username AWS --password-stdin public.ecr.aws 2>/dev/null || true
-  helm upgrade --install gateway-api-controller \
+  helm upgrade --install amazon-vpclattice-controller \
     oci://public.ecr.aws/aws-application-networking-k8s/aws-gateway-controller-chart \
     --version=v2.0.1 \
     --namespace aws-application-networking-system \
@@ -201,7 +204,7 @@ deploy_cluster_config() {
 
   step "Creating VPC Lattice GatewayClass..."
   kubectl apply -f "${K8S_DIR}/cluster-config/gatewayclass-vpc-lattice.yaml"
-  success "GatewayClass amazon-vpc-lattice created"
+  success "GatewayClass amazon-vpclattice-controller created"
 
   step "Installing ExternalDNS (private zone)..."
   install_external_dns "${TF_PRIVATE_HZ_ID}" "private"
@@ -224,7 +227,7 @@ deploy_cluster_config() {
   success "Service account ready"
 
   step "Installing Gateway API Controller for VPC Lattice (Helm)..."
-  helm upgrade --install gateway-api-controller \
+  helm upgrade --install amazon-vpclattice-controller \
     oci://public.ecr.aws/aws-application-networking-k8s/aws-gateway-controller-chart \
     --version=v2.0.1 \
     --namespace aws-application-networking-system \
@@ -240,21 +243,21 @@ deploy_cluster_config() {
 
   step "Creating VPC Lattice GatewayClass..."
   kubectl apply -f "${K8S_DIR}/cluster-config/gatewayclass-vpc-lattice.yaml"
-  success "GatewayClass amazon-vpc-lattice created"
+  success "GatewayClass amazon-vpclattice-controller created"
 
   step "Installing ExternalDNS (private zone)..."
   install_external_dns "${TF_PRIVATE_HZ_ID}" "private"
   success "ExternalDNS running on Backend B"
 
-  # ── Frontend ───────────────────────────────────────────────────────────────
-  use_cluster "${FRONTEND_CLUSTER}"
+  # ── Edge ────────────────────────────────────────────────────────────────────
+  use_cluster "${EDGE_CLUSTER}"
 
   step "Applying Graviton NodePool..."
   kubectl apply -f "${K8S_DIR}/cluster-config/nodepool-graviton.yaml"
   success "NodePool applied"
 
-  step "Installing Gateway API CRDs (standard + ALB)..."
-  kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.3.0/standard-install.yaml 2>/dev/null
+  step "Installing Gateway API CRDs (experimental + ALB)..."
+  kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/experimental-install.yaml 2>/dev/null
   kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/refs/heads/main/config/crd/gateway/gateway-crds.yaml 2>/dev/null
   success "Gateway API CRDs installed"
 
@@ -263,15 +266,15 @@ deploy_cluster_config() {
   success "Service account ready"
 
   step "Installing AWS Load Balancer Controller (Gateway API mode)..."
-  FRONTEND_VPC_ID=$(aws eks describe-cluster --region "${AWS_REGION}" --name "${FRONTEND_CLUSTER}" \
+  EDGE_VPC_ID=$(aws eks describe-cluster --region "${AWS_REGION}" --name "${EDGE_CLUSTER}" \
     --query "cluster.resourcesVpcConfig.vpcId" --output text)
   helm repo add eks https://aws.github.io/eks-charts 2>/dev/null || true
   helm repo update 2>/dev/null
-  helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
+  helm upgrade --install aws-lb-controller eks/aws-load-balancer-controller \
     -n kube-system \
-    --set clusterName="${FRONTEND_CLUSTER}" \
+    --set clusterName="${EDGE_CLUSTER}" \
     --set region="${AWS_REGION}" \
-    --set vpcId="${FRONTEND_VPC_ID}" \
+    --set vpcId="${EDGE_VPC_ID}" \
     --set serviceAccount.create=false \
     --set serviceAccount.name=aws-load-balancer-controller \
     --set "controllerConfig.featureGates.ALBGatewayAPI=true" \
@@ -280,11 +283,39 @@ deploy_cluster_config() {
 
   step "Creating ALB GatewayClass..."
   kubectl apply -f "${K8S_DIR}/cluster-config/gatewayclass-alb.yaml"
-  success "GatewayClass aws-alb created"
+  success "GatewayClass aws-lb-controller created"
 
-  step "Installing ExternalDNS (public zone)..."
-  install_external_dns "$(read_tfvar public_hosted_zone_id)" "public"
-  success "ExternalDNS running on Frontend"
+  step "Creating service account for Gateway API Controller..."
+  kubectl create namespace aws-application-networking-system --dry-run=client -o yaml | kubectl apply -f -
+  kubectl apply -f "${K8S_DIR}/cluster-config/aws-application-networking-sa.yaml"
+  success "Service account ready"
+
+  step "Installing Gateway API Controller for VPC Lattice (Helm)..."
+  helm upgrade --install amazon-vpclattice-controller \
+    oci://public.ecr.aws/aws-application-networking-k8s/aws-gateway-controller-chart \
+    --version=v2.0.1 \
+    --namespace aws-application-networking-system \
+    --set=serviceAccount.create=false \
+    --set=awsRegion="${AWS_REGION}" \
+    --set=awsAccountId="${ACCOUNT_ID}" \
+    --set=clusterVpcId="${EDGE_VPC_ID}" \
+    --set=clusterName="${EDGE_CLUSTER}" \
+    --set=defaultServiceNetwork="${TF_SERVICE_NETWORK_NAME}" \
+    --set=log.level=info \
+    --wait --timeout=10m 2>&1 | tail -3
+  success "Gateway API Controller running on Edge"
+
+  step "Creating VPC Lattice GatewayClass..."
+  kubectl apply -f "${K8S_DIR}/cluster-config/gatewayclass-vpc-lattice.yaml"
+  success "GatewayClass amazon-vpclattice-controller created"
+
+  step "Installing ExternalDNS (public zone — ALB records)..."
+  install_external_dns "$(read_tfvar public_hosted_zone_id)" "public" "external-dns-public" "external-dns/zone=public"
+  success "ExternalDNS (public) running on Edge"
+
+  step "Installing ExternalDNS (private zone — VPC Lattice records)..."
+  install_external_dns "${TF_PRIVATE_HZ_ID}" "private" "external-dns-private" "external-dns/zone=private"
+  success "ExternalDNS (private) running on Edge"
 }
 
 
@@ -294,43 +325,47 @@ deploy_apps() {
 
   load_tf_outputs
 
-  # ── Backend A: Cart + Inventory ────────────────────────────────────────────
+  # ── Backend A: Catalog + Pricing ─────────────────────────────────────────
   use_cluster "${BACKEND_A_CLUSTER}"
 
-  step "Deploying Cart Service..."
-  kubectl apply -f "${K8S_DIR}/applications/cart-inventory-services/cart-service.yaml"
+  step "Deploying Catalog Service..."
+  kubectl apply -f "${K8S_DIR}/applications/items/catalog-service.yaml"
   sed "s|<ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com|${ECR_BASE}|g" \
-    "${K8S_DIR}/applications/cart-inventory-services/cart-deployment.yaml" | kubectl apply -f -
-  success "Cart Service deployed"
+    "${K8S_DIR}/applications/items/catalog-deployment.yaml" | kubectl apply -f -
+  success "Catalog Service deployed"
 
-  step "Deploying Inventory Service..."
-  kubectl apply -f "${K8S_DIR}/applications/cart-inventory-services/inventory-service.yaml"
+  step "Deploying Pricing Service..."
+  kubectl apply -f "${K8S_DIR}/applications/items/pricing-service.yaml"
   sed "s|<ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com|${ECR_BASE}|g" \
-    "${K8S_DIR}/applications/cart-inventory-services/inventory-deployment.yaml" | kubectl apply -f -
-  success "Inventory Service deployed"
+    "${K8S_DIR}/applications/items/pricing-deployment.yaml" | kubectl apply -f -
+  success "Pricing Service deployed"
 
   step "Waiting for pods on Backend A..."
-  kubectl wait --for=condition=Ready pod -l app=cart-service --timeout=120s 2>/dev/null || warn "Cart pods not ready yet (may need more time for nodes)"
-  kubectl wait --for=condition=Ready pod -l app=inventory-service --timeout=120s 2>/dev/null || warn "Inventory pods not ready yet"
+  kubectl wait --for=condition=Ready pod -l app=catalog-service --timeout=120s 2>/dev/null || warn "Catalog pods not ready yet (may need more time for nodes)"
+  kubectl wait --for=condition=Ready pod -l app=pricing-service --timeout=120s 2>/dev/null || warn "Pricing pods not ready yet"
   kubectl get pods
   echo ""
 
-  # ── Backend B: Payments ────────────────────────────────────────────────────
+  # ── Backend B: Cart ────────────────────────────────────────────────────────
   use_cluster "${BACKEND_B_CLUSTER}"
 
-  step "Deploying Payments Service..."
-  kubectl apply -f "${K8S_DIR}/applications/payments-service/service.yaml"
-  sed "s|<ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com|${ECR_BASE}|g" \
-    "${K8S_DIR}/applications/payments-service/deployment.yaml" | kubectl apply -f -
-  success "Payments Service deployed"
+  step "Deploying Cart Service..."
+  kubectl apply -f "${K8S_DIR}/applications/cart/serviceaccount.yaml"
+  kubectl apply -f "${K8S_DIR}/applications/cart/service.yaml"
+  sed -e "s|<ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com|${ECR_BASE}|g" \
+      -e "s|<PRIVATE_ZONE>|${PRIVATE_ZONE}|g" \
+      -e "s|<VPCLATTICE_PROTOCOL>|${VPCLATTICE_PROTOCOL}|g" \
+      -e "s|<AWS_REGION>|${AWS_REGION}|g" \
+    "${K8S_DIR}/applications/cart/deployment.yaml" | kubectl apply -f -
+  success "Cart Service deployed"
 
   step "Waiting for pods on Backend B..."
-  kubectl wait --for=condition=Ready pod -l app=payments-service --timeout=120s 2>/dev/null || warn "Payments pods not ready yet"
+  kubectl wait --for=condition=Ready pod -l app=cart-service --timeout=120s 2>/dev/null || warn "Cart pods not ready yet"
   kubectl get pods
   echo ""
 
-  # ── Frontend: Frontend + BFF ───────────────────────────────────────────────
-  use_cluster "${FRONTEND_CLUSTER}"
+  # ── Edge: Frontend + BFF + Payments ────────────────────────────────────────
+  use_cluster "${EDGE_CLUSTER}"
 
   step "Deploying Frontend..."
   kubectl apply -f "${K8S_DIR}/applications/frontend/service.yaml"
@@ -348,9 +383,16 @@ deploy_apps() {
     "${K8S_DIR}/applications/bff/deployment.yaml" | kubectl apply -f -
   success "BFF deployed"
 
-  step "Waiting for pods on Frontend cluster..."
+  step "Deploying Payments Service..."
+  kubectl apply -f "${K8S_DIR}/applications/payments/service.yaml"
+  sed "s|<ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com|${ECR_BASE}|g" \
+    "${K8S_DIR}/applications/payments/deployment.yaml" | kubectl apply -f -
+  success "Payments Service deployed"
+
+  step "Waiting for pods on Edge cluster..."
   kubectl wait --for=condition=Ready pod -l app=frontend --timeout=120s 2>/dev/null || warn "Frontend pods not ready yet"
   kubectl wait --for=condition=Ready pod -l app=bff --timeout=120s 2>/dev/null || warn "BFF pods not ready yet"
+  kubectl wait --for=condition=Ready pod -l app=payments-service --timeout=120s 2>/dev/null || warn "Payments pods not ready yet"
   kubectl get pods
 }
 
@@ -360,8 +402,8 @@ deploy_networking() {
 
   load_tf_outputs
 
-  # ── Frontend: ALB Gateway ──────────────────────────────────────────────────
-  use_cluster "${FRONTEND_CLUSTER}"
+  # ── Edge: ALB Gateway ────────────────────────────────────────────────────
+  use_cluster "${EDGE_CLUSTER}"
 
   if [ "${ALB_PROTOCOL}" = "HTTPS" ]; then
     step "Deploying ALB Gateway (internet-facing, HTTPS)..."
@@ -392,32 +434,54 @@ deploy_networking() {
     info "Access the frontend at: http://${ALB_HOSTNAME}"
   fi
 
-  # ── Backend A: VPC Lattice for Items (cart + inventory) ────────────────────
+  # ── Backend A: VPC Lattice for Items (catalog + pricing, host-based routing) ─
   use_cluster "${BACKEND_A_CLUSTER}"
 
-  step "Deploying VPC Lattice resources for Items service (cart + inventory)..."
+  step "Deploying VPC Lattice resources for Items service (catalog + pricing)..."
   if [ "${VPCLATTICE_PROTOCOL}" = "HTTPS" ]; then
     sed -e "s|<VPCLATTICE_CERTIFICATE_ARN>|${VPCLATTICE_CERTIFICATE_ARN}|g" \
         -e "s|<ITEMS_HOSTNAME>|items.${PRIVATE_ZONE}|g" \
         -e "s|<SERVICE_NETWORK_NAME>|${TF_SERVICE_NETWORK_NAME}|g" \
         -e "s|<ITEMS_LOG_GROUP_ARN>|${TF_ITEMS_LOG_GROUP_ARN}|g" \
-      "${K8S_DIR}/applications/cart-inventory-services/vpc-lattice-https.yaml" | kubectl apply -f -
+      "${K8S_DIR}/applications/items/vpc-lattice-https.yaml" | kubectl apply -f -
   else
     warn "VPC Lattice protocol is HTTP. Traffic between BFF and backend services will be unencrypted."
     warn "HTTPS is recommended for production environments."
     sed -e "s|<ITEMS_HOSTNAME>|items.${PRIVATE_ZONE}|g" \
         -e "s|<SERVICE_NETWORK_NAME>|${TF_SERVICE_NETWORK_NAME}|g" \
         -e "s|<ITEMS_LOG_GROUP_ARN>|${TF_ITEMS_LOG_GROUP_ARN}|g" \
-      "${K8S_DIR}/applications/cart-inventory-services/vpc-lattice-http.yaml" | kubectl apply -f -
+      "${K8S_DIR}/applications/items/vpc-lattice-http.yaml" | kubectl apply -f -
   fi
-  success "Items VPC Lattice resources applied"
+  success "Items VPC Lattice resources applied (header-based routing)"
 
   step "Waiting for Items VPC Lattice service (up to 5 min)..."
-  wait_for_lattice_service "items-service-route"
+  wait_for_lattice_service "items-route"
   info "ExternalDNS will create the DNS record for items.${PRIVATE_ZONE}"
 
-  # ── Backend B: VPC Lattice for Payments ────────────────────────────────────
+  # ── Backend B: VPC Lattice for Cart ────────────────────────────────────────
   use_cluster "${BACKEND_B_CLUSTER}"
+
+  step "Deploying VPC Lattice resources for Cart service..."
+  if [ "${VPCLATTICE_PROTOCOL}" = "HTTPS" ]; then
+    sed -e "s|<VPCLATTICE_CERTIFICATE_ARN>|${VPCLATTICE_CERTIFICATE_ARN}|g" \
+        -e "s|<CART_HOSTNAME>|cart.${PRIVATE_ZONE}|g" \
+        -e "s|<SERVICE_NETWORK_NAME>|${TF_SERVICE_NETWORK_NAME}|g" \
+        -e "s|<CART_LOG_GROUP_ARN>|${TF_CART_LOG_GROUP_ARN}|g" \
+      "${K8S_DIR}/applications/cart/vpc-lattice-https.yaml" | kubectl apply -f -
+  else
+    sed -e "s|<CART_HOSTNAME>|cart.${PRIVATE_ZONE}|g" \
+        -e "s|<SERVICE_NETWORK_NAME>|${TF_SERVICE_NETWORK_NAME}|g" \
+        -e "s|<CART_LOG_GROUP_ARN>|${TF_CART_LOG_GROUP_ARN}|g" \
+      "${K8S_DIR}/applications/cart/vpc-lattice-http.yaml" | kubectl apply -f -
+  fi
+  success "Cart VPC Lattice resources applied"
+
+  step "Waiting for Cart VPC Lattice service (up to 5 min)..."
+  wait_for_lattice_service "cart-route"
+  info "ExternalDNS will create the DNS record for cart.${PRIVATE_ZONE}"
+
+  # ── Edge: VPC Lattice for Payments ─────────────────────────────────────────
+  use_cluster "${EDGE_CLUSTER}"
 
   step "Deploying VPC Lattice resources for Payments service..."
   if [ "${VPCLATTICE_PROTOCOL}" = "HTTPS" ]; then
@@ -425,21 +489,21 @@ deploy_networking() {
         -e "s|<PAYMENTS_HOSTNAME>|payments.${PRIVATE_ZONE}|g" \
         -e "s|<SERVICE_NETWORK_NAME>|${TF_SERVICE_NETWORK_NAME}|g" \
         -e "s|<PAYMENTS_LOG_GROUP_ARN>|${TF_PAYMENTS_LOG_GROUP_ARN}|g" \
-      "${K8S_DIR}/applications/payments-service/vpc-lattice-https.yaml" | kubectl apply -f -
+      "${K8S_DIR}/applications/payments/vpc-lattice-https.yaml" | kubectl apply -f -
   else
     sed -e "s|<PAYMENTS_HOSTNAME>|payments.${PRIVATE_ZONE}|g" \
         -e "s|<SERVICE_NETWORK_NAME>|${TF_SERVICE_NETWORK_NAME}|g" \
         -e "s|<PAYMENTS_LOG_GROUP_ARN>|${TF_PAYMENTS_LOG_GROUP_ARN}|g" \
-      "${K8S_DIR}/applications/payments-service/vpc-lattice-http.yaml" | kubectl apply -f -
+      "${K8S_DIR}/applications/payments/vpc-lattice-http.yaml" | kubectl apply -f -
   fi
   success "Payments VPC Lattice resources applied"
 
   step "Waiting for Payments VPC Lattice service (up to 5 min)..."
-  wait_for_lattice_service "payments-service-route"
+  wait_for_lattice_service "payments-route"
   info "ExternalDNS will create the DNS record for payments.${PRIVATE_ZONE}"
 
   # ── Restart BFF to pick up DNS ─────────────────────────────────────────────
-  use_cluster "${FRONTEND_CLUSTER}"
+  use_cluster "${EDGE_CLUSTER}"
   step "Restarting BFF to pick up new VPC Lattice DNS entries..."
   kubectl rollout restart deployment/bff
   kubectl rollout status deployment/bff --timeout=60s 2>/dev/null || true
@@ -462,8 +526,8 @@ teardown_networking() {
   if cluster_exists "${BACKEND_A_CLUSTER}"; then
     step "Removing Items VPC Lattice resources (Backend A)..."
     use_cluster "${BACKEND_A_CLUSTER}"
-    kubectl delete -f "${K8S_DIR}/applications/cart-inventory-services/vpc-lattice-https.yaml" --ignore-not-found --timeout=120s 2>/dev/null || true
-    kubectl delete -f "${K8S_DIR}/applications/cart-inventory-services/vpc-lattice-http.yaml" --ignore-not-found --timeout=120s 2>/dev/null || true
+    kubectl delete -f "${K8S_DIR}/applications/items/vpc-lattice-https.yaml" --ignore-not-found --timeout=120s 2>/dev/null || true
+    kubectl delete -f "${K8S_DIR}/applications/items/vpc-lattice-http.yaml" --ignore-not-found --timeout=120s 2>/dev/null || true
     success "Items VPC Lattice resources removed"
     did_something=true
   else
@@ -471,26 +535,30 @@ teardown_networking() {
   fi
 
   if cluster_exists "${BACKEND_B_CLUSTER}"; then
-    step "Removing Payments VPC Lattice resources (Backend B)..."
+    step "Removing Cart VPC Lattice resources (Backend B)..."
     use_cluster "${BACKEND_B_CLUSTER}"
-    kubectl delete -f "${K8S_DIR}/applications/payments-service/vpc-lattice-https.yaml" --ignore-not-found --timeout=120s 2>/dev/null || true
-    kubectl delete -f "${K8S_DIR}/applications/payments-service/vpc-lattice-http.yaml" --ignore-not-found --timeout=120s 2>/dev/null || true
-    success "Payments VPC Lattice resources removed"
+    kubectl delete -f "${K8S_DIR}/applications/cart/vpc-lattice-https.yaml" --ignore-not-found --timeout=120s 2>/dev/null || true
+    kubectl delete -f "${K8S_DIR}/applications/cart/vpc-lattice-http.yaml" --ignore-not-found --timeout=120s 2>/dev/null || true
+    success "Cart VPC Lattice resources removed"
     did_something=true
   else
-    info "Cluster ${BACKEND_B_CLUSTER} not found — skipping Payments VPC Lattice cleanup"
+    info "Cluster ${BACKEND_B_CLUSTER} not found — skipping Cart VPC Lattice cleanup"
   fi
 
   # ── Remove ALB Gateway ─────────────────────────────────────────────────────
-  if cluster_exists "${FRONTEND_CLUSTER}"; then
-    step "Removing ALB Gateway (Frontend)..."
-    use_cluster "${FRONTEND_CLUSTER}"
+  if cluster_exists "${EDGE_CLUSTER}"; then
+    step "Removing ALB Gateway (Edge)..."
+    use_cluster "${EDGE_CLUSTER}"
     kubectl delete -f "${K8S_DIR}/applications/frontend/alb-gateway-https.yaml" --ignore-not-found --timeout=120s 2>/dev/null || true
     kubectl delete -f "${K8S_DIR}/applications/frontend/alb-gateway-http.yaml" --ignore-not-found --timeout=120s 2>/dev/null || true
     success "ALB Gateway removed"
+    step "Removing Payments VPC Lattice resources (Edge)..."
+    kubectl delete -f "${K8S_DIR}/applications/payments/vpc-lattice-https.yaml" --ignore-not-found --timeout=120s 2>/dev/null || true
+    kubectl delete -f "${K8S_DIR}/applications/payments/vpc-lattice-http.yaml" --ignore-not-found --timeout=120s 2>/dev/null || true
+    success "Payments VPC Lattice resources removed"
     did_something=true
   else
-    info "Cluster ${FRONTEND_CLUSTER} not found — skipping ALB Gateway cleanup"
+    info "Cluster ${EDGE_CLUSTER} not found — skipping ALB Gateway cleanup"
   fi
 
   if [ "${did_something}" = true ]; then
@@ -503,24 +571,23 @@ teardown_networking() {
 teardown_apps() {
   banner "TEARDOWN 2 / 4 — Remove Applications"
 
-  if cluster_exists "${FRONTEND_CLUSTER}"; then
-    step "Removing apps from Frontend cluster..."
-    use_cluster "${FRONTEND_CLUSTER}"
+  if cluster_exists "${EDGE_CLUSTER}"; then
+    step "Removing apps from Edge cluster..."
+    use_cluster "${EDGE_CLUSTER}"
     kubectl delete -f "${K8S_DIR}/applications/bff/" --ignore-not-found 2>/dev/null || true
     kubectl delete -f "${K8S_DIR}/applications/frontend/service.yaml" --ignore-not-found 2>/dev/null || true
     kubectl delete -f "${K8S_DIR}/applications/frontend/deployment.yaml" --ignore-not-found 2>/dev/null || true
-    success "Frontend apps removed"
+    kubectl delete -f "${K8S_DIR}/applications/payments/service.yaml" --ignore-not-found 2>/dev/null || true
+    kubectl delete -f "${K8S_DIR}/applications/payments/deployment.yaml" --ignore-not-found 2>/dev/null || true
+    success "Edge apps removed"
   else
-    info "Cluster ${FRONTEND_CLUSTER} not found — skipping Frontend app cleanup"
+    info "Cluster ${EDGE_CLUSTER} not found — skipping Edge app cleanup"
   fi
 
   if cluster_exists "${BACKEND_A_CLUSTER}"; then
     step "Removing apps from Backend A cluster..."
     use_cluster "${BACKEND_A_CLUSTER}"
-    kubectl delete -f "${K8S_DIR}/applications/cart-inventory-services/cart-service.yaml" --ignore-not-found 2>/dev/null || true
-    kubectl delete -f "${K8S_DIR}/applications/cart-inventory-services/cart-deployment.yaml" --ignore-not-found 2>/dev/null || true
-    kubectl delete -f "${K8S_DIR}/applications/cart-inventory-services/inventory-service.yaml" --ignore-not-found 2>/dev/null || true
-    kubectl delete -f "${K8S_DIR}/applications/cart-inventory-services/inventory-deployment.yaml" --ignore-not-found 2>/dev/null || true
+    kubectl delete -f "${K8S_DIR}/applications/items/" --ignore-not-found 2>/dev/null || true
     success "Backend A apps removed"
   else
     info "Cluster ${BACKEND_A_CLUSTER} not found — skipping Backend A app cleanup"
@@ -529,7 +596,7 @@ teardown_apps() {
   if cluster_exists "${BACKEND_B_CLUSTER}"; then
     step "Removing apps from Backend B cluster..."
     use_cluster "${BACKEND_B_CLUSTER}"
-    kubectl delete -f "${K8S_DIR}/applications/payments-service/" --ignore-not-found 2>/dev/null || true
+    kubectl delete -f "${K8S_DIR}/applications/cart/" --ignore-not-found 2>/dev/null || true
     success "Backend B apps removed"
   else
     info "Cluster ${BACKEND_B_CLUSTER} not found — skipping Backend B app cleanup"
@@ -541,18 +608,23 @@ teardown_cluster_config() {
 
   load_tf_outputs_safe
 
-  # ── Frontend ───────────────────────────────────────────────────────────────
-  if cluster_exists "${FRONTEND_CLUSTER}"; then
-    step "Removing controllers from Frontend cluster..."
-    use_cluster "${FRONTEND_CLUSTER}"
+  # ── Edge ────────────────────────────────────────────────────────────────────
+  if cluster_exists "${EDGE_CLUSTER}"; then
+    step "Removing controllers from Edge cluster..."
+    use_cluster "${EDGE_CLUSTER}"
+    helm uninstall external-dns-public -n external-dns 2>/dev/null || true
+    helm uninstall external-dns-private -n external-dns 2>/dev/null || true
     helm uninstall external-dns -n external-dns 2>/dev/null || true
-    helm uninstall aws-load-balancer-controller -n kube-system 2>/dev/null || true
+    helm uninstall aws-lb-controller -n kube-system 2>/dev/null || true
+    helm uninstall amazon-vpclattice-controller -n aws-application-networking-system 2>/dev/null || true
     kubectl delete -f "${K8S_DIR}/cluster-config/gatewayclass-alb.yaml" --ignore-not-found --timeout=30s 2>/dev/null || true
+    kubectl delete -f "${K8S_DIR}/cluster-config/gatewayclass-vpc-lattice.yaml" --ignore-not-found --timeout=30s 2>/dev/null || true
     kubectl delete -f "${K8S_DIR}/cluster-config/aws-lbc-sa.yaml" --ignore-not-found --timeout=30s 2>/dev/null || true
+    kubectl delete namespace aws-application-networking-system --ignore-not-found --timeout=60s 2>/dev/null || true
     kubectl delete namespace external-dns --ignore-not-found --timeout=60s 2>/dev/null || true
-    success "Frontend controllers removed"
+    success "Edge controllers removed"
   else
-    info "Cluster ${FRONTEND_CLUSTER} not found — skipping Frontend controller cleanup"
+    info "Cluster ${EDGE_CLUSTER} not found — skipping Edge controller cleanup"
   fi
 
   # ── Backend A ──────────────────────────────────────────────────────────────
@@ -560,7 +632,7 @@ teardown_cluster_config() {
     step "Removing controllers from Backend A cluster..."
     use_cluster "${BACKEND_A_CLUSTER}"
     helm uninstall external-dns -n external-dns 2>/dev/null || true
-    helm uninstall gateway-api-controller -n aws-application-networking-system 2>/dev/null || true
+    helm uninstall amazon-vpclattice-controller -n aws-application-networking-system 2>/dev/null || true
     kubectl delete -f "${K8S_DIR}/cluster-config/gatewayclass-vpc-lattice.yaml" --ignore-not-found --timeout=30s 2>/dev/null || true
     kubectl delete namespace aws-application-networking-system --ignore-not-found --timeout=60s 2>/dev/null || true
     kubectl delete namespace external-dns --ignore-not-found --timeout=60s 2>/dev/null || true
@@ -574,7 +646,7 @@ teardown_cluster_config() {
     step "Removing controllers from Backend B cluster..."
     use_cluster "${BACKEND_B_CLUSTER}"
     helm uninstall external-dns -n external-dns 2>/dev/null || true
-    helm uninstall gateway-api-controller -n aws-application-networking-system 2>/dev/null || true
+    helm uninstall amazon-vpclattice-controller -n aws-application-networking-system 2>/dev/null || true
     kubectl delete -f "${K8S_DIR}/cluster-config/gatewayclass-vpc-lattice.yaml" --ignore-not-found --timeout=30s 2>/dev/null || true
     kubectl delete namespace aws-application-networking-system --ignore-not-found --timeout=60s 2>/dev/null || true
     kubectl delete namespace external-dns --ignore-not-found --timeout=60s 2>/dev/null || true
@@ -636,7 +708,9 @@ load_tf_outputs() {
   TF_PRIVATE_HZ_ID="${TF_PRIVATE_HZ_ID:-$(terraform -chdir="${INFRA_DIR}" output -raw private_hosted_zone_id)}"
   TF_ITEMS_LOG_GROUP_ARN="${TF_ITEMS_LOG_GROUP_ARN:-$(terraform -chdir="${INFRA_DIR}" output -raw items_service_log_group_arn)}"
   TF_PAYMENTS_LOG_GROUP_ARN="${TF_PAYMENTS_LOG_GROUP_ARN:-$(terraform -chdir="${INFRA_DIR}" output -raw payments_service_log_group_arn)}"
+  TF_CART_LOG_GROUP_ARN="${TF_CART_LOG_GROUP_ARN:-$(terraform -chdir="${INFRA_DIR}" output -raw cart_service_log_group_arn)}"
   TF_WAF_ACL_ARN="${TF_WAF_ACL_ARN:-$(terraform -chdir="${INFRA_DIR}" output -raw frontend_waf_acl_arn)}"
+  TF_EDGE_VPC_ID="${TF_EDGE_VPC_ID:-$(terraform -chdir="${INFRA_DIR}" output -raw edge_vpc_id)}"
   TF_BACKEND_A_VPC_ID="${TF_BACKEND_A_VPC_ID:-$(terraform -chdir="${INFRA_DIR}" output -raw backend_a_vpc_id)}"
   TF_BACKEND_B_VPC_ID="${TF_BACKEND_B_VPC_ID:-$(terraform -chdir="${INFRA_DIR}" output -raw backend_b_vpc_id)}"
 }
@@ -647,7 +721,9 @@ load_tf_outputs_safe() {
   TF_PRIVATE_HZ_ID="${TF_PRIVATE_HZ_ID:-$(terraform -chdir="${INFRA_DIR}" output -raw private_hosted_zone_id 2>/dev/null || true)}"
   TF_ITEMS_LOG_GROUP_ARN="${TF_ITEMS_LOG_GROUP_ARN:-$(terraform -chdir="${INFRA_DIR}" output -raw items_service_log_group_arn 2>/dev/null || true)}"
   TF_PAYMENTS_LOG_GROUP_ARN="${TF_PAYMENTS_LOG_GROUP_ARN:-$(terraform -chdir="${INFRA_DIR}" output -raw payments_service_log_group_arn 2>/dev/null || true)}"
+  TF_CART_LOG_GROUP_ARN="${TF_CART_LOG_GROUP_ARN:-$(terraform -chdir="${INFRA_DIR}" output -raw cart_service_log_group_arn 2>/dev/null || true)}"
   TF_WAF_ACL_ARN="${TF_WAF_ACL_ARN:-$(terraform -chdir="${INFRA_DIR}" output -raw frontend_waf_acl_arn 2>/dev/null || true)}"
+  TF_EDGE_VPC_ID="${TF_EDGE_VPC_ID:-$(terraform -chdir="${INFRA_DIR}" output -raw edge_vpc_id 2>/dev/null || true)}"
   TF_BACKEND_A_VPC_ID="${TF_BACKEND_A_VPC_ID:-$(terraform -chdir="${INFRA_DIR}" output -raw backend_a_vpc_id 2>/dev/null || true)}"
   TF_BACKEND_B_VPC_ID="${TF_BACKEND_B_VPC_ID:-$(terraform -chdir="${INFRA_DIR}" output -raw backend_b_vpc_id 2>/dev/null || true)}"
 }
@@ -691,7 +767,7 @@ cleanup_externaldns_records() {
   fi
 
   # ── Public hosted zone (ALB A/AAAA aliases + TXT) ──────────────────────────
-  # ExternalDNS on the frontend cluster only creates records when
+  # ExternalDNS on the edge cluster only creates records when
   # alb_protocol = HTTPS (HTTP mode has no custom domain to register).
   if [ "${ALB_PROTOCOL}" = "HTTPS" ]; then
     local public_hz_id
@@ -786,17 +862,28 @@ else:
 }
 
 # Install ExternalDNS via Helm on the current cluster context
-# Usage: install_external_dns <zone_id> <zone_type>
-#   zone_id   — Route 53 hosted zone ID to manage
-#   zone_type — "public" or "private" (maps to --aws-zone-type)
+# Usage: install_external_dns <zone_id> <zone_type> [release_name] [annotation_filter]
+#   zone_id           — Route 53 hosted zone ID to manage
+#   zone_type         — "public" or "private" (maps to --aws-zone-type)
+#   release_name      — Helm release name (default: external-dns)
+#   annotation_filter — Only process resources with this annotation (optional)
 install_external_dns() {
   local zone_id="$1"
   local zone_type="$2"
+  local release_name="${3:-external-dns}"
+  local annotation_filter="${4:-}"
   kubectl create namespace external-dns --dry-run=client -o yaml | kubectl apply -f -
   kubectl apply -f "${K8S_DIR}/cluster-config/external-dns-sa.yaml"
   helm repo add external-dns https://kubernetes-sigs.github.io/external-dns/ 2>/dev/null || true
   helm repo update 2>/dev/null
-  helm upgrade --install external-dns external-dns/external-dns \
+  local -a extra_args=(
+    "--set=extraArgs.aws-zone-type=${zone_type}"
+    "--set=extraArgs.zone-id-filter=${zone_id}"
+  )
+  if [ -n "${annotation_filter}" ]; then
+    extra_args+=("--set=extraArgs.annotation-filter=${annotation_filter}")
+  fi
+  helm upgrade --install "${release_name}" external-dns/external-dns \
     --namespace external-dns \
     --set provider.name=aws \
     --set "sources={gateway-httproute}" \
@@ -805,8 +892,7 @@ install_external_dns() {
     --set policy=upsert-only \
     --set registry=txt \
     --set txtOwnerId="${PROJECT_PREFIX}" \
-    --set "extraArgs.aws-zone-type=${zone_type}" \
-    --set "extraArgs.zone-id-filter=${zone_id}" \
+    "${extra_args[@]}" \
     --wait --timeout=5m 2>&1 | tail -3
 }
 
@@ -859,7 +945,7 @@ case "${ACTION}" in
 
     banner "DEPLOYMENT COMPLETE 🎉"
     echo ""
-    ALB_HOSTNAME=$(use_cluster "${FRONTEND_CLUSTER}" > /dev/null 2>&1 && \
+    ALB_HOSTNAME=$(use_cluster "${EDGE_CLUSTER}" > /dev/null 2>&1 && \
       kubectl get gateway frontend-gateway -o jsonpath='{.status.addresses[0].value}' 2>/dev/null || true)
     if [ -n "${ALB_HOSTNAME}" ]; then
       info "Frontend ALB:  ${ALB_HOSTNAME}"

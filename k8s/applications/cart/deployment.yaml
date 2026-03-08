@@ -1,41 +1,46 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: inventory-service
+  name: cart-service
   labels:
-    app: inventory-service
+    app: cart-service
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
-      app: inventory-service
+      app: cart-service
   template:
     metadata:
       labels:
-        app: inventory-service
+        app: cart-service
     spec:
-      terminationGracePeriodSeconds: 30
+      serviceAccountName: cart-service-account
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
-      topologySpreadConstraints:
-      - maxSkew: 1
-        topologyKey: kubernetes.io/hostname
-        whenUnsatisfiable: ScheduleAnyway
-        labelSelector:
-          matchLabels:
-            app: inventory-service
+      dnsConfig:
+        options:
+        - name: ndots
+          value: "1"
       containers:
-        image: <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/eks-gateway-demo/inventory-service:latest
+      - name: cart-service
+        image: <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/eks-gateway-demo/cart:latest
         imagePullPolicy: Always
         ports:
         - containerPort: 8000
+        env:
+        - name: PAYMENTS_SERVICE_URL
+          value: "<VPCLATTICE_PROTOCOL>://payments.<PRIVATE_ZONE>"
+        - name: AWS_REGION
+          value: "<AWS_REGION>"
+        - name: REQUEST_TIMEOUT
+          value: "10"
         resources:
           requests:
             cpu: 50m
             memory: 64Mi
           limits:
-            memory: 256Mi   # no CPU limit — fractional limits cause throttling; requests handle scheduling
+            memory: 256Mi
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
@@ -62,13 +67,3 @@ spec:
       - name: tmp
         emptyDir:
           medium: Memory
----
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: inventory-service-pdb
-spec:
-  minAvailable: 1
-  selector:
-    matchLabels:
-      app: inventory-service

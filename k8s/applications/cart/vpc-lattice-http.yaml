@@ -1,0 +1,89 @@
+# VPC Lattice resources for Cart Service (Backend-B) — HTTP mode
+#
+# Backend-B both serves (cart) and consumes (payments) VPC Lattice services.
+# No VpcAssociationPolicy with associateWithVpc: false — the VPC association
+# is created by Terraform so the cart service can resolve payments.<domain>.
+#
+# Placeholders: <CART_HOSTNAME>, <SERVICE_NETWORK_NAME>, <CART_LOG_GROUP_ARN>
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: <SERVICE_NETWORK_NAME>
+spec:
+  gatewayClassName: amazon-vpclattice-controller
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: cart-route
+spec:
+  hostnames:
+  - "<CART_HOSTNAME>"
+  parentRefs:
+  - name: <SERVICE_NETWORK_NAME>
+    sectionName: http
+  rules:
+  - backendRefs:
+    - name: cart-service
+      kind: Service
+      port: 8000
+---
+apiVersion: application-networking.k8s.aws/v1alpha1
+kind: TargetGroupPolicy
+metadata:
+  name: cart-service-tgp
+spec:
+  targetRef:
+    group: ""
+    kind: Service
+    name: cart-service
+  protocol: HTTP
+  protocolVersion: HTTP1
+  healthCheck:
+    enabled: true
+    path: "/health"
+    port: 8000
+    protocol: HTTP
+    protocolVersion: HTTP1
+    statusMatch: "200"
+    intervalSeconds: 10
+    timeoutSeconds: 5
+    healthyThresholdCount: 2
+    unhealthyThresholdCount: 3
+---
+apiVersion: application-networking.k8s.aws/v1alpha1
+kind: IAMAuthPolicy
+metadata:
+  name: cart-service-auth
+spec:
+  targetRef:
+    group: "gateway.networking.k8s.io"
+    kind: HTTPRoute
+    name: cart-route
+  policy: |
+    {
+      "Version": "2012-10-17",
+      "Statement": [{
+        "Effect": "Allow",
+        "Principal": "*",
+        "Resource": "*",
+        "Condition": { "StringNotEqualsIgnoreCase": { "aws:PrincipalType": "anonymous" } },
+        "Action": "*"
+      }]
+    }
+---
+apiVersion: application-networking.k8s.aws/v1alpha1
+kind: AccessLogPolicy
+metadata:
+  name: cart-service-access-logs
+spec:
+  destinationArn: "<CART_LOG_GROUP_ARN>"
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: cart-route

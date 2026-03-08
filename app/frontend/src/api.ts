@@ -1,4 +1,4 @@
-import type { InventoryResponse, CartResponse, PaymentConfirmation, HealthResponse } from "./types";
+import type { CatalogResponse, PricingResponse, CartResponse, CheckoutResponse, HealthResponse } from "./types";
 
 export class ApiError extends Error {
   constructor(message: string, public status: number) {
@@ -16,7 +16,8 @@ async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
   return resp.json();
 }
 
-export const fetchInventory = () => fetchJSON<InventoryResponse>("/api/inventory");
+export const fetchCatalog = () => fetchJSON<CatalogResponse>("/api/catalog");
+export const fetchPricing = () => fetchJSON<PricingResponse>("/api/pricing");
 export const fetchCart = () => fetchJSON<CartResponse>("/api/cart");
 export const fetchHealth = () => fetchJSON<HealthResponse>("/api/health");
 
@@ -32,10 +33,6 @@ export function clearCart() {
   return fetchJSON<{ status: string; count: number }>("/api/cart", { method: "DELETE" });
 }
 
-export function processPayment(items: { sku: string; name: string; price: number }[], total: number) {
-  return fetchJSON<PaymentConfirmation>("/api/payments", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ items, total }),
-  });
+export function checkout() {
+  return fetchJSON<CheckoutResponse>("/api/checkout", { method: "POST" });
 }

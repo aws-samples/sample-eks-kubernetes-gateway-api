@@ -1,16 +1,16 @@
 # # =============================================================================
 # # Backend A — VPC, EKS Cluster (Auto Mode), Gateway API Controller
-# # Hosts: cart service + inventory service
+# # Hosts: catalog service + pricing service
 # # =============================================================================
 
 # # =============================================================================
 # # Backend A VPC
 # # =============================================================================
 
-resource "aws_ecr_repository" "cart_service" {
+resource "aws_ecr_repository" "catalog" {
   #checkov:skip=CKV_AWS_136:KMS encryption adds cost and complexity not relevant to this Gateway API sample
   #checkov:skip=CKV_AWS_51:Mutable tags accepted for this sample — see security/report.html
-  name                 = "${var.project_prefix}/cart-service"
+  name                 = "${var.project_prefix}/catalog"
   image_tag_mutability = "MUTABLE"
   force_delete         = true
 
@@ -19,10 +19,10 @@ resource "aws_ecr_repository" "cart_service" {
   }
 }
 
-resource "aws_ecr_repository" "inventory_service" {
+resource "aws_ecr_repository" "pricing" {
   #checkov:skip=CKV_AWS_136:KMS encryption adds cost and complexity not relevant to this Gateway API sample
   #checkov:skip=CKV_AWS_51:Mutable tags accepted for this sample — see security/report.html
-  name                 = "${var.project_prefix}/inventory-service"
+  name                 = "${var.project_prefix}/pricing"
   image_tag_mutability = "MUTABLE"
   force_delete         = true
 

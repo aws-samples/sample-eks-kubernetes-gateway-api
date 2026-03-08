@@ -1,6 +1,7 @@
 # =============================================================================
-# Frontend — VPC, EKS Cluster (Auto Mode), ECR Repositories (Frontend + BFF),
-#             WAF WebACL, ALB via Gateway API, BFF Pod Identity for SigV4 signing
+# Edge — VPC, EKS Cluster (Auto Mode), ECR Repositories (Frontend + BFF),
+#         WAF WebACL, ALB via Gateway API, VPC Lattice Gateway API Controller,
+#         BFF Pod Identity for SigV4 signing
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -31,16 +32,39 @@ resource "aws_ecr_repository" "bff" {
   }
 }
 
+resource "aws_ecr_repository" "payments" {
+  #checkov:skip=CKV_AWS_136:KMS encryption adds cost and complexity not relevant to this Gateway API sample
+  #checkov:skip=CKV_AWS_51:Mutable tags accepted for this sample — see security/report.html
+  name                 = "${var.project_prefix}/payments"
+  image_tag_mutability = "MUTABLE"
+  force_delete         = true
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+}
+
 # =============================================================================
-# FRONTEND VPC
+# CloudWatch log group (for Payments VPC Lattice service logs)
 # =============================================================================
 
-module "frontend_vpc" {
+resource "aws_cloudwatch_log_group" "payments_service_loggroup" {
+  #checkov:skip=CKV_AWS_158:KMS encryption adds cost and complexity not relevant to this Gateway API sample
+  #checkov:skip=CKV_AWS_338:7-day retention is sufficient for a sample; increase for production
+  name              = "/aws/vpc-lattice/${var.project_prefix}-payments-service"
+  retention_in_days = 7
+}
+
+# =============================================================================
+# EDGE VPC
+# =============================================================================
+
+module "edge_vpc" {
   #checkov:skip=CKV_TF_1:Version pinning is sufficient for a sample; commit hash pinning is a production concern
   source  = "aws-ia/vpc/aws"
   version = "= 4.7.3"
 
-  name                                 = "${var.project_prefix}-frontend-vpc"
+  name                                 = "${var.project_prefix}-edge-vpc"
   cidr_block                           = "10.0.0.0/16"
   vpc_assign_generated_ipv6_cidr_block = true
   az_count                             = 2
@@ -73,7 +97,7 @@ module "frontend_vpc" {
 # Security group for VPC Lattice service network VPC association
 resource "aws_security_group" "vpclattice_association_sg" {
   description = "Security group for VPC Lattice service network association"
-  vpc_id      = module.frontend_vpc.vpc_attributes.id
+  vpc_id      = module.edge_vpc.vpc_attributes.id
 
   tags = {
     Name = "${var.project_prefix}-lattice-association-sg"
@@ -90,14 +114,14 @@ resource "aws_vpc_security_group_ingress_rule" "lattice_association_ingress_eks"
   ip_protocol                  = "tcp"
   from_port                    = var.vpclattice_protocol == "HTTPS" ? 443 : 80
   to_port                      = var.vpclattice_protocol == "HTTPS" ? 443 : 80
-  referenced_security_group_id = aws_eks_cluster.frontend.vpc_config[0].cluster_security_group_id
+  referenced_security_group_id = aws_eks_cluster.edge.vpc_config[0].cluster_security_group_id
 }
 
 # =============================================================================
-# EKS Frontend Cluster (Auto Mode)
+# EKS Edge Cluster (Auto Mode)
 # =============================================================================
-resource "aws_eks_cluster" "frontend" {
-  name     = "${var.project_prefix}-frontend-cluster"
+resource "aws_eks_cluster" "edge" {
+  name     = "${var.project_prefix}-edge-cluster"
   role_arn = aws_iam_role.eks_cluster.arn
   version  = var.kubernetes_version
 
@@ -135,11 +159,11 @@ resource "aws_eks_cluster" "frontend" {
   vpc_config {
     endpoint_private_access = true
     endpoint_public_access  = true
-    subnet_ids              = [for k, v in module.frontend_vpc.private_subnet_attributes_by_az : v.id if startswith(k, "private/")]
+    subnet_ids              = [for k, v in module.edge_vpc.private_subnet_attributes_by_az : v.id if startswith(k, "private/")]
   }
 
   tags = {
-    Name = "${var.project_prefix}-frontend-cluster"
+    Name = "${var.project_prefix}-edge-cluster"
   }
 
   depends_on = [
@@ -151,20 +175,39 @@ resource "aws_eks_cluster" "frontend" {
   ]
 }
 
-resource "aws_eks_access_entry" "frontend_admin" {
-  cluster_name  = aws_eks_cluster.frontend.name
+# VPC Lattice prefix list — allow ingress on service ports
+resource "aws_vpc_security_group_ingress_rule" "edge_lattice_ingress" {
+  security_group_id = aws_eks_cluster.edge.vpc_config[0].cluster_security_group_id
+  description       = "Allow VPC Lattice traffic"
+  ip_protocol       = "-1"
+  prefix_list_id    = data.aws_ec2_managed_prefix_list.vpc_lattice.id
+}
+
+resource "aws_eks_access_entry" "edge_admin" {
+  cluster_name  = aws_eks_cluster.edge.name
   principal_arn = data.aws_iam_session_context.current.issuer_arn
   type          = "STANDARD"
 }
 
-resource "aws_eks_access_policy_association" "frontend_admin" {
-  cluster_name  = aws_eks_cluster.frontend.name
-  principal_arn = aws_eks_access_entry.frontend_admin.principal_arn
+resource "aws_eks_access_policy_association" "edge_admin" {
+  cluster_name  = aws_eks_cluster.edge.name
+  principal_arn = aws_eks_access_entry.edge_admin.principal_arn
   policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
 
   access_scope {
     type = "cluster"
   }
+}
+
+# =============================================================================
+# Gateway API Controller Pod Identity Association (edge cluster)
+# =============================================================================
+
+resource "aws_eks_pod_identity_association" "edge_gateway_api_controller" {
+  cluster_name    = aws_eks_cluster.edge.name
+  namespace       = "aws-application-networking-system"
+  service_account = "gateway-api-controller"
+  role_arn        = aws_iam_role.gateway_api_controller.arn
 }
 
 # =============================================================================

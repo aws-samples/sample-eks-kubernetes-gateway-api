@@ -9,7 +9,7 @@ The [Kubernetes Gateway API](https://gateway-api.sigs.k8s.io/) provides a unifie
 - **North-South traffic.** The [AWS Load Balancer Controller](https://kubernetes-sigs.github.io/aws-load-balancer-controller/) implements the Gateway API to manage internet-facing [Elastic Load Balancers](https://aws.amazon.com/es/elasticloadbalancing/) for external ingress.
 - **East-West traffic.** The [Amazon VPC Lattice Gateway API Controller](https://www.gateway-api-controller.eks.aws.dev/) implements the same Gateway API to connect services across clusters and VPCs through [Amazon VPC Lattice](https://aws.amazon.com/vpc/lattice/), removing the need for a routable network between them.
 
-The application is a three-EKS cluster e-commerce platform: a React frontend and a BFF service on the frontend cluster, cart and inventory services on Backend-A, and a payments service on Backend-B. Every user interaction flows through the full architecture, so you can observe the Gateway API machinery in action at each layer.
+The application is a three EKS cluster e-commerce platform: a React frontend, a BFF, and a Payments service on the edge cluster; Catalog and Pricing services on Backend A; and a Cart service on Backend B. The edge cluster showcases both controllers running side by side: the ALB controller serves the frontend to the internet, while the VPC Lattice controller publishes Payments as a Lattice service consumed by the Cart service on Backend B during checkout. Every user interaction flows through the full architecture, so you can observe the Gateway API machinery in action at each layer.
 
 **During deployment** you can watch in the AWS Console as Kubernetes resources trigger real infrastructure changes: applying a `Gateway` manifest creates an ALB with listeners and target groups; applying a VPC Lattice `HTTPRoute` creates a VPC Lattice service, registers pod IPs as targets, and associates the service with the service network.
 
@@ -39,8 +39,8 @@ The following AWS resources are created by this sample. Ensure your account has 
 |---------|------------------|
 | Amazon VPC | 3 VPCs, public/private subnets, NAT gateways, internet gateways |
 | Amazon EKS | 3 clusters (Auto Mode), IAM roles for control plane and nodes |
-| Amazon ECR | 5 repositories (frontend, bff, cart-service, inventory-service, payments-service) |
-| Amazon VPC Lattice | 1 service network, 2 services (items, payments), target groups, IAM auth policies |
+| Amazon ECR | 6 repositories (frontend, bff, catalog, pricing, cart, payments) |
+| Amazon VPC Lattice | 1 service network, 3 services (items, cart, payments), target groups, IAM auth policies |
 | Elastic Load Balancing | 1 Application Load Balancer |
 | AWS WAF | 1 WebACL with managed rule groups |
 | AWS IAM | Cluster roles, node roles, Pod Identity roles and associations |
@@ -142,27 +142,27 @@ This runs steps 1-5: ECR repos, container images, Terraform (VPCs, EKS clusters,
 Once complete, verify the services are up on each cluster:
 
 ```bash
-# Frontend cluster
-aws eks update-kubeconfig --region <region> --name eks-gateway-demo-frontend-cluster
-kubectl get pods   # frontend and bff pods should be Running
+# Edge cluster
+aws eks update-kubeconfig --region <region> --name eks-gateway-demo-edge-cluster
+kubectl get pods   # frontend, bff, and payments pods should be Running
 
-# Backend-A cluster
+# Backend A cluster
 aws eks update-kubeconfig --region <region> --name eks-gateway-demo-backend-a-cluster
-kubectl get pods   # cart-service and inventory-service pods should be Running
+kubectl get pods   # catalog and pricing pods should be Running
 
-# Backend-B cluster
+# Backend B cluster
 aws eks update-kubeconfig --region <region> --name eks-gateway-demo-backend-b-cluster
-kubectl get pods   # payments-service pods should be Running
+kubectl get pods   # cart pods should be Running
 ```
 
 See [Cluster Configuration](docs/cluster-configuration.md) for details on what gets installed on each cluster and why, and [Application Services](docs/application-services.md) for details on each service and the BFF pattern.
 
 ### Step 2: Create the ALB (north-south)
 
-Switch to the frontend cluster and apply the ALB Gateway resources:
+Switch to the edge cluster and apply the ALB Gateway resources:
 
 ```bash
-aws eks update-kubeconfig --region <region> --name eks-gateway-demo-frontend-cluster
+aws eks update-kubeconfig --region <region> --name eks-gateway-demo-edge-cluster
 
 kubectl apply -f k8s/applications/frontend/alb-gateway.yaml
 ```
@@ -184,59 +184,62 @@ The AWS Load Balancer Controller translated a `Gateway` and `HTTPRoute` into a f
 
 Once the Gateway shows an address and the ALB is live, you can already open `https://<your-frontend-domain>` in a browser. The frontend will load and the architecture diagram will show the frontend service as reachable (green). The backend services will show as unreachable (red) since the VPC Lattice services don't exist yet. This is intentional: it lets you see the diagram update in real time as you complete the next steps.
 
-See [Gateway API Controllers](docs/gateway-api.md#frontend-cluster-aws-load-balancer-controller) for the full resource breakdown and manifest details.
+See [Gateway API Controllers](docs/gateway-api.md#edge-cluster-aws-load-balancer-controller) for the full resource breakdown and manifest details.
 
 ### Step 3: Create the VPC Lattice services (east-west)
 
-Switch to Backend-A and apply the items VPC Lattice resources:
+Switch to Backend A and apply the items VPC Lattice resources:
 
 ```bash
 aws eks update-kubeconfig --region <region> --name eks-gateway-demo-backend-a-cluster
 
-kubectl apply -f k8s/applications/cart-inventory-services/vpc-lattice.yaml
+kubectl apply -f k8s/applications/items/vpc-lattice.yaml
 ```
 
 Watch the HTTPRoute status:
 
 ```bash
-kubectl get httproute items-service-route -w
+kubectl get httproute items-route -w
 # Wait for the application-networking.k8s.aws/lattice-service-arn annotation to appear
 ```
 
 While that runs, open the AWS Console and observe:
 
 - [VPC Lattice > Services](https://console.aws.amazon.com/vpc/home#Services): the items service appears and gets associated with the service network
-- [VPC Lattice > Target Groups](https://console.aws.amazon.com/vpc/home#TargetGroups): two target groups are created (one for cart, one for inventory) with pod IPs registered
-- [VPC Lattice > Services > Listeners](https://console.aws.amazon.com/vpc/home#Services): an HTTPS:443 listener with header-based routing rules (`x-service: cart` routes to the cart target group, `x-service: inventory` routes to the inventory target group)
+- [VPC Lattice > Target Groups](https://console.aws.amazon.com/vpc/home#TargetGroups): two target groups are created (one for catalog, one for pricing) with pod IPs registered
+- [VPC Lattice > Services > Listeners](https://console.aws.amazon.com/vpc/home#Services): an HTTPS:443 listener with header based routing rules (`x-service: catalog` routes to the catalog target group, `x-service: pricing` routes to the pricing target group)
 
-Now do the same for Backend-B:
+Now do the same for Backend B (cart) and the edge cluster (payments):
 
 ```bash
+# Backend B: Cart service
 aws eks update-kubeconfig --region <region> --name eks-gateway-demo-backend-b-cluster
+kubectl apply -f k8s/applications/cart/vpc-lattice.yaml
+kubectl get httproute cart-route -w
 
-kubectl apply -f k8s/applications/payments-service/vpc-lattice.yaml
-
-kubectl get httproute payments-service-route -w
-# Wait for the lattice-service-arn annotation to appear
+# Edge: Payments service
+aws eks update-kubeconfig --region <region> --name eks-gateway-demo-edge-cluster
+kubectl apply -f k8s/applications/payments/vpc-lattice.yaml
+kubectl get httproute payments-route -w
 ```
 
-The VPC Lattice Gateway API Controller translated the same `Gateway` and `HTTPRoute` resources into a VPC Lattice service with no routable network required between the clusters.
+The VPC Lattice Gateway API Controller translated the same `Gateway` and `HTTPRoute` resources into VPC Lattice services with no routable network required between the clusters.
 
 ExternalDNS will create the private DNS records automatically within about 1 minute. You can verify:
 
 ```bash
 # VPC Lattice CNAMEs in the private hosted zone
 aws route53 list-resource-record-sets --hosted-zone-id <private-hz-id> \
-  --query "ResourceRecordSets[?contains(Name,'items') || contains(Name,'payments')]"
+  --query "ResourceRecordSets[?contains(Name,'items') || contains(Name,'cart') || contains(Name,'payments')]"
 ```
 
-Once the records exist, go back to the frontend. The architecture diagram will update as each service becomes reachable: cart and inventory turn green once the items service is ready on Backend-A, and payments turns green once Backend-B is done. You can now use the full application:
+Once the records exist, go back to the frontend. The architecture diagram will update as each service becomes reachable: catalog and pricing turn green once the items service is ready on Backend A, cart turns green once Backend B is done, and payments turns green once the edge VPC Lattice service is ready. You can now use the full application:
 
-- **Browse the catalog**: the frontend calls the BFF, which calls the inventory service through VPC Lattice
-- **Add items to cart**: each add triggers a SigV4-signed request to the cart service through the same VPC Lattice service, routed by the `x-service: cart` header
-- **Process a payment**: the BFF calls the payments service on Backend-B through a separate VPC Lattice service
+- **Browse the catalog**: the frontend calls the BFF, which calls the catalog and pricing services through VPC Lattice with header based routing
+- **Add items to cart**: each add triggers a SigV4 signed request to the cart service through VPC Lattice
+- **Checkout**: the BFF calls the cart checkout endpoint through VPC Lattice, which in turn calls the payments service on the edge cluster through a second VPC Lattice hop
 
-On every API response, click the service panel in the UI to see the raw VPC Lattice headers attached to the request: source VPC, caller identity ARN, request ID, and more. These headers are what VPC Lattice injects on every authenticated call, and they confirm the full path the request took through the architecture.
+On every API response, click the VPC Lattice headers button to see the raw headers attached to the request: source VPC, caller identity ARN, request ID, and more. During checkout, you can see headers from both hops (cart and payments), showing how the caller identity changes between the BFF and the cart service.
 
 See [Gateway API Controllers](docs/gateway-api.md#backend-clusters-vpc-lattice-gateway-api-controller) for the full resource breakdown.
 
@@ -261,9 +264,10 @@ See [Gateway API Controllers](docs/gateway-api.md#backend-clusters-vpc-lattice-g
 ├── app/
 │   ├── frontend/                      # React + Vite + Tailwind
 │   ├── bff/                           # FastAPI: orchestrates calls with SigV4
-│   ├── cart-service/                  # FastAPI: in-memory shopping cart
-│   ├── inventory-service/             # FastAPI: product catalog
-│   └── payments-service/              # FastAPI: payment processing
+│   ├── catalog/                       # FastAPI: product catalog data
+│   ├── pricing/                       # FastAPI: product pricing data
+│   ├── cart/                          # FastAPI: shopping cart with checkout via VPC Lattice
+│   └── payments/                      # FastAPI: payment processing
 └── docs/                              # Deep-dive documentation
 ```
 

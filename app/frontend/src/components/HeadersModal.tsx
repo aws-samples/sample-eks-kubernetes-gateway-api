@@ -3,6 +3,7 @@ import { motion } from "framer-motion";
 interface Props {
   headers: Record<string, string>;
   onClose: () => void;
+  title?: string;
 }
 
 function parseSubValues(value: string): { key: string; val: string }[] | null {
@@ -17,7 +18,7 @@ function parseSubValues(value: string): { key: string; val: string }[] | null {
   return parsed as { key: string; val: string }[];
 }
 
-export default function HeadersModal({ headers, onClose }: Props) {
+export default function HeadersModal({ headers, onClose, title }: Props) {
   const entries = Object.entries(headers);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
@@ -29,7 +30,7 @@ export default function HeadersModal({ headers, onClose }: Props) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-5 py-3 border-b border-slate-700">
-          <h3 className="text-sm font-semibold text-purple-300">VPC Lattice Headers</h3>
+          <h3 className="text-sm font-semibold text-purple-300">{title ?? "VPC Lattice Headers"}</h3>
           <button onClick={onClose} className="text-slate-500 hover:text-slate-300 text-lg leading-none">&times;</button>
         </div>
         <div className="overflow-y-auto p-4">

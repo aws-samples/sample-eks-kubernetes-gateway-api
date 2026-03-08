@@ -1,25 +1,33 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: cart-service
+  name: catalog-service
   labels:
-    app: cart-service
+    app: catalog-service
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
-      app: cart-service
+      app: catalog-service
   template:
     metadata:
       labels:
-        app: cart-service
+        app: catalog-service
     spec:
+      terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: catalog-service
       containers:
-      - name: cart-service
-        image: <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/eks-gateway-demo/cart-service:latest
+      - name: catalog-service
+        image: <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/eks-gateway-demo/catalog:latest
         imagePullPolicy: Always
         ports:
         - containerPort: 8000
@@ -28,7 +36,7 @@ spec:
             cpu: 50m
             memory: 64Mi
           limits:
-            memory: 256Mi   # no CPU limit — fractional limits cause throttling; requests handle scheduling
+            memory: 256Mi
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
@@ -55,3 +63,13 @@ spec:
       - name: tmp
         emptyDir:
           medium: Memory
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: catalog-service-pdb
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: catalog-service
